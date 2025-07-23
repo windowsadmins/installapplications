@@ -1,470 +1,281 @@
-using CommandLine;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using InstallApplications.Common.Options;
-using InstallApplications.Core.Services;
-using InstallApplications.Service;
-using System.Diagnostics;
-using System.ServiceProcess;
 
-namespace InstallApplications;
-
-class Program
+namespace InstallApplications
 {
-    static async Task<int> Main(string[] args)
+    public record PackageItem(
+        string displayname,
+        string file,
+        string hash,
+        string url,
+        string[]? arguments,
+        string type,
+        string? condition = null
+    );
+
+    public record BootstrapConfig(
+        PackageItem[] setupassistant,
+        PackageItem[] userland
+    );
+
+    class Program
     {
-        try
+        private static readonly HttpClient httpClient = new();
+        private static ILogger<Program>? logger;
+        private static IConfiguration? configuration;
+
+        static async Task<int> Main(string[] args)
         {
-            return await Parser.Default.ParseArguments<InstallOptions, ServiceOptions, BootstrapOptions, ValidateOptions>(args)
-                .MapResult(
-                    (InstallOptions opts) => RunInstallAsync(opts),
-                    (ServiceOptions opts) => RunServiceCommand(opts),
-                    (BootstrapOptions opts) => RunBootstrapAsync(opts),
-                    (ValidateOptions opts) => RunValidateAsync(opts),
-                    errs => Task.FromResult(1));
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Unhandled exception: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static async Task<int> RunInstallAsync(InstallOptions options)
-    {
-        try
-        {
-            Console.WriteLine("InstallApplications - Direct Installation Mode");
-            Console.WriteLine($"Repository: {options.RepositoryUrl}");
-            Console.WriteLine($"Phase: {options.Phase}");
-            Console.WriteLine($"Dry Run: {options.DryRun}");
-            Console.WriteLine();
-
-            var host = CreateHostBuilder(options).Build();
-            var packageService = host.Services.GetRequiredService<IPackageService>();
-            var logger = host.Services.GetRequiredService<ILogger<Program>>();
-
-            logger.LogInformation("Starting direct package installation");
-
-            var packages = await packageService.GetPackagesAsync(options.RepositoryUrl);
-            var filteredPackages = packages
-                .Where(p => p.Phase.Equals(options.Phase, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(p => p.Order)
-                .ThenBy(p => p.Name)
-                .ToList();
-
-            if (filteredPackages.Count == 0)
+            // Basic setup
+            var host = CreateHostBuilder(args).Build();
+            logger = host.Services.GetRequiredService<ILogger<Program>>();
+            configuration = host.Services.GetRequiredService<IConfiguration>();
+            
+            logger.LogInformation("Cimian InstallApplications starting for Windows bootstrap...");
+            
+            try
             {
-                Console.WriteLine($"No packages found for phase '{options.Phase}'");
-                return 0;
-            }
-
-            Console.WriteLine($"Found {filteredPackages.Count} packages to install:");
-            foreach (var package in filteredPackages)
-            {
-                Console.WriteLine($"  - {package.Name} ({package.Type})");
-            }
-            Console.WriteLine();
-
-            if (options.DryRun)
-            {
-                Console.WriteLine("Dry run mode - no packages will be installed");
-                return 0;
-            }
-
-            var downloadPath = @"C:\ProgramData\InstallApplications\Downloads";
-            Directory.CreateDirectory(downloadPath);
-
-            var installedPackages = new HashSet<string>();
-            var success = true;
-
-            foreach (var package in filteredPackages)
-            {
-                Console.WriteLine($"Installing {package.Name}...");
-
-                // Download
-                if (!await packageService.DownloadPackageAsync(package, downloadPath))
+                // Use Cimian's Azure CDN for bootstrap configuration
+                var bootstrapUrl = configuration["BootstrapJsonUrl"] ?? 
+                    "https://cimian.ecuad.ca/packages/InstallApplications/bootstrap.json";
+                
+                logger.LogInformation("Downloading Cimian bootstrap configuration from: {Url}", bootstrapUrl);
+                var jsonContent = await httpClient.GetStringAsync(bootstrapUrl);
+                var config = JsonSerializer.Deserialize<BootstrapConfig>(jsonContent);
+                
+                if (config == null)
                 {
-                    Console.WriteLine($"  Failed to download {package.Name}");
-                    if (package.Required && !options.ContinueOnError)
-                    {
-                        success = false;
-                        break;
-                    }
-                    continue;
-                }
-
-                // Install
-                if (!await packageService.InstallPackageAsync(package, downloadPath))
-                {
-                    Console.WriteLine($"  Failed to install {package.Name}");
-                    if (package.Required && !options.ContinueOnError)
-                    {
-                        success = false;
-                        break;
-                    }
-                    continue;
-                }
-
-                Console.WriteLine($"  Successfully installed {package.Name}");
-                installedPackages.Add(package.Name);
-            }
-
-            // Cleanup
-            if (Directory.Exists(downloadPath))
-            {
-                Directory.Delete(downloadPath, true);
-            }
-
-            Console.WriteLine();
-            Console.WriteLine(success ? "Installation completed successfully" : "Installation completed with errors");
-            return success ? 0 : 1;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error during installation: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static Task<int> RunServiceCommand(ServiceOptions options)
-    {
-        try
-        {
-            var serviceName = "InstallApplicationsService";
-
-            if (options.Install)
-            {
-                return Task.FromResult(InstallService(serviceName));
-            }
-            else if (options.Uninstall)
-            {
-                return Task.FromResult(UninstallService(serviceName));
-            }
-            else if (options.Start)
-            {
-                return Task.FromResult(StartService(serviceName));
-            }
-            else if (options.Stop)
-            {
-                return Task.FromResult(StopService(serviceName));
-            }
-            else if (options.Status)
-            {
-                return Task.FromResult(ShowServiceStatus(serviceName));
-            }
-            else
-            {
-                // If no specific action, check if we should run as service
-                if (Environment.UserInteractive)
-                {
-                    Console.WriteLine("No service action specified. Use --help for available options.");
-                    return Task.FromResult(1);
-                }
-                else
-                {
-                    // Running as Windows Service
-                    var host = CreateServiceHost();
-                    return host.RunAsync().ContinueWith(_ => 0);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service operation failed: {ex.Message}");
-            return Task.FromResult(1);
-        }
-    }
-
-    static async Task<int> RunBootstrapAsync(BootstrapOptions options)
-    {
-        try
-        {
-            Console.WriteLine("InstallApplications - Bootstrap Mode");
-            Console.WriteLine($"Repository: {options.RepositoryUrl}");
-            Console.WriteLine();
-
-            // Store configuration in registry
-            StoreConfiguration(options.RepositoryUrl, options.ConfigFile);
-
-            // Install service
-            var serviceName = "InstallApplicationsService";
-            if (InstallService(serviceName) != 0)
-            {
-                Console.WriteLine("Failed to install service");
-                return 1;
-            }
-
-            if (options.AutoStart)
-            {
-                // Start service
-                if (StartService(serviceName) != 0)
-                {
-                    Console.WriteLine("Failed to start service");
+                    logger.LogError("Failed to parse Cimian bootstrap configuration");
                     return 1;
                 }
 
-                Console.WriteLine("Bootstrap completed successfully. Service is running.");
-            }
-            else
-            {
-                Console.WriteLine("Bootstrap completed successfully. Service installed but not started.");
-            }
+                // Check if we're in OOBE/Setup Assistant context
+                var isSetupAssistant = IsInSetupAssistantContext();
+                logger.LogInformation("Windows OOBE/Setup context detected: {IsSetupAssistant}", isSetupAssistant);
 
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Bootstrap failed: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static async Task<int> RunValidateAsync(ValidateOptions options)
-    {
-        try
-        {
-            Console.WriteLine("InstallApplications - Manifest Validation");
-            Console.WriteLine($"Repository: {options.RepositoryUrl}");
-            Console.WriteLine();
-
-            var host = CreateHostBuilder(new InstallOptions { RepositoryUrl = options.RepositoryUrl }).Build();
-            var packageService = host.Services.GetRequiredService<IPackageService>();
-
-            var packages = await packageService.GetPackagesAsync(options.RepositoryUrl);
-            
-            Console.WriteLine($"Found {packages.Count} packages in manifest");
-            
-            var validPackages = 0;
-            var invalidPackages = 0;
-
-            foreach (var package in packages)
-            {
-                Console.Write($"  {package.Name} ({package.Type}): ");
-                
-                var isValid = true;
-                var errors = new List<string>();
-
-                // Basic validation
-                if (string.IsNullOrEmpty(package.Name))
+                if (isSetupAssistant && config.setupassistant?.Length > 0)
                 {
-                    errors.Add("Missing name");
-                    isValid = false;
+                    logger.LogInformation("Processing Cimian Setup Assistant packages...");
+                    await ProcessPackages(config.setupassistant);
                 }
 
-                if (string.IsNullOrEmpty(package.Type))
+                // Check if user is logged in for userland packages
+                var isUserLoggedIn = IsUserLoggedIn();
+                logger.LogInformation("User session available: {IsUserLoggedIn}", isUserLoggedIn);
+
+                if (isUserLoggedIn && config.userland?.Length > 0)
                 {
-                    errors.Add("Missing type");
-                    isValid = false;
+                    logger.LogInformation("Processing Cimian Userland packages...");
+                    await ProcessPackages(config.userland);
                 }
 
-                if (string.IsNullOrEmpty(package.Url))
-                {
-                    errors.Add("Missing URL");
-                    isValid = false;
-                }
-
-                if (options.CheckUrls && !string.IsNullOrEmpty(package.Url))
-                {
-                    // TODO: Check if URL is accessible
-                }
-
-                if (isValid)
-                {
-                    Console.WriteLine("✓ Valid");
-                    validPackages++;
-                }
-                else
-                {
-                    Console.WriteLine($"✗ Invalid ({string.Join(", ", errors)})");
-                    invalidPackages++;
-                }
-            }
-
-            Console.WriteLine();
-            Console.WriteLine($"Validation complete: {validPackages} valid, {invalidPackages} invalid");
-            return invalidPackages > 0 ? 1 : 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Validation failed: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static IHostBuilder CreateHostBuilder(InstallOptions options) =>
-        Host.CreateDefaultBuilder()
-            .ConfigureServices((hostContext, services) =>
-            {
-                services.AddHttpClient();
-                services.AddSingleton<IPackageService, PackageService>();
-                services.AddLogging(builder =>
-                {
-                    builder.AddConsole();
-                    if (options.Verbose)
-                    {
-                        builder.SetMinimumLevel(LogLevel.Debug);
-                    }
-                });
-            });
-
-    static IHost CreateServiceHost() =>
-        Host.CreateDefaultBuilder()
-            .UseWindowsService(options =>
-            {
-                options.ServiceName = "InstallApplicationsService";
-            })
-            .ConfigureServices((hostContext, services) =>
-            {
-                services.AddHttpClient();
-                services.AddSingleton<IPackageService, PackageService>();
-                services.AddHostedService<InstallApplicationsWorker>();
-            })
-            .ConfigureLogging(logging =>
-            {
-                logging.AddEventLog(settings =>
-                {
-                    settings.SourceName = "InstallApplications";
-                });
-            })
-            .Build();
-
-    static int InstallService(string serviceName)
-    {
-        try
-        {
-            var exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
-            var arguments = "service";
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "sc.exe",
-                Arguments = $"create \"{serviceName}\" binPath= \"\\\"{exePath}\\\" {arguments}\" start= auto",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            using var process = Process.Start(startInfo);
-            process?.WaitForExit();
-
-            if (process?.ExitCode == 0)
-            {
-                Console.WriteLine($"Service '{serviceName}' installed successfully");
+                logger.LogInformation("Cimian InstallApplications completed successfully");
                 return 0;
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine($"Failed to install service '{serviceName}'");
+                logger?.LogError(ex, "Cimian InstallApplications failed: {Message}", ex.Message);
                 return 1;
             }
         }
-        catch (Exception ex)
+
+        static IHostBuilder CreateHostBuilder(string[] args) =>
+            Host.CreateDefaultBuilder(args)
+                .ConfigureAppConfiguration((context, config) =>
+                {
+                    config.AddJsonFile("appsettings.json", optional: true);
+                    config.AddEnvironmentVariables();
+                    config.AddCommandLine(args);
+                })
+                .ConfigureLogging(logging =>
+                {
+                    logging.ClearProviders();
+                    logging.AddConsole();
+                    logging.AddEventLog(settings =>
+                    {
+                        settings.SourceName = "Cimian InstallApplications";
+                    });
+                });
+
+        static async Task ProcessPackages(PackageItem[] packages)
         {
-            Console.WriteLine($"Error installing service: {ex.Message}");
-            return 1;
+            foreach (var package in packages)
+            {
+                try
+                {
+                    // Check condition if specified
+                    if (!string.IsNullOrEmpty(package.condition) && !EvaluateCondition(package.condition))
+                    {
+                        logger?.LogInformation("Skipping {DisplayName} - condition not met: {Condition}", 
+                            package.displayname, package.condition);
+                        continue;
+                    }
+
+                    logger?.LogInformation("Processing Cimian package: {DisplayName}", package.displayname);
+                    
+                    // Download package
+                    var tempPath = Path.Combine(Path.GetTempPath(), package.file);
+                    await DownloadFile(package.url, tempPath);
+                    
+                    // Verify hash if specified
+                    if (package.hash == "sha256")
+                    {
+                        // For now, skip hash verification - would need hash values in config
+                        logger?.LogInformation("Hash verification configured for {File} (not yet implemented)", package.file);
+                    }
+                    
+                    // Install package
+                    await InstallPackage(tempPath, package.arguments);
+                    
+                    // Cleanup
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                    
+                    logger?.LogInformation("Successfully installed Cimian package: {DisplayName}", package.displayname);
+                }
+                catch (Exception ex)
+                {
+                    logger?.LogError(ex, "Failed to install Cimian package {DisplayName}: {Message}", 
+                        package.displayname, ex.Message);
+                    // Continue with other packages
+                }
+            }
         }
-    }
 
-    static int UninstallService(string serviceName)
-    {
-        try
+        static async Task DownloadFile(string url, string filePath)
         {
-            StopService(serviceName);
+            logger?.LogInformation("Downloading from Cimian CDN: {Url} to {FilePath}", url, filePath);
+            
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Add("User-Agent", "InstallApplications-Windows/1.0 Cimian-Bootstrap");
+            
+            using var response = await httpClient.SendAsync(request);
+            response.EnsureSuccessStatusCode();
+            
+            await using var fileStream = File.Create(filePath);
+            await response.Content.CopyToAsync(fileStream);
+            
+            logger?.LogInformation("Downloaded {FileSize} bytes from Cimian CDN", new FileInfo(filePath).Length);
+        }
 
+        static async Task InstallPackage(string filePath, string[]? arguments)
+        {
+            var args = arguments != null ? string.Join(" ", arguments) : "";
+            logger?.LogInformation("Installing Cimian package {FilePath} with arguments: {Arguments}", filePath, args);
+            
             var startInfo = new ProcessStartInfo
             {
-                FileName = "sc.exe",
-                Arguments = $"delete \"{serviceName}\"",
+                FileName = filePath,
+                Arguments = args,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                Verb = "runas" // Request elevation for system packages
             };
-
+            
             using var process = Process.Start(startInfo);
-            process?.WaitForExit();
-
-            Console.WriteLine($"Service '{serviceName}' uninstalled");
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error uninstalling service: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static int StartService(string serviceName)
-    {
-        try
-        {
-            using var service = new ServiceController(serviceName);
-            if (service.Status != ServiceControllerStatus.Running)
+            if (process == null)
             {
-                service.Start();
-                service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(30));
+                throw new InvalidOperationException($"Failed to start Cimian package installation: {filePath}");
             }
-            Console.WriteLine($"Service '{serviceName}' started");
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error starting service: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static int StopService(string serviceName)
-    {
-        try
-        {
-            using var service = new ServiceController(serviceName);
-            if (service.Status != ServiceControllerStatus.Stopped)
+            
+            await process.WaitForExitAsync();
+            
+            if (process.ExitCode != 0)
             {
-                service.Stop();
-                service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(30));
+                var error = await process.StandardError.ReadToEndAsync();
+                var output = await process.StandardOutput.ReadToEndAsync();
+                logger?.LogWarning("Package installation output: {Output}", output);
+                logger?.LogError("Package installation error: {Error}", error);
+                throw new InvalidOperationException($"Cimian package installation failed with exit code {process.ExitCode}: {error}");
             }
-            Console.WriteLine($"Service '{serviceName}' stopped");
-            return 0;
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error stopping service: {ex.Message}");
-            return 1;
-        }
-    }
 
-    static int ShowServiceStatus(string serviceName)
-    {
-        try
+        static bool EvaluateCondition(string condition)
         {
-            using var service = new ServiceController(serviceName);
-            Console.WriteLine($"Service '{serviceName}' status: {service.Status}");
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Service '{serviceName}' not found or error: {ex.Message}");
-            return 1;
-        }
-    }
-
-    static void StoreConfiguration(string repositoryUrl, string? configFile)
-    {
-        try
-        {
-            var key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(@"SOFTWARE\InstallApplications");
-            key.SetValue("RepositoryUrl", repositoryUrl);
-            if (!string.IsNullOrEmpty(configFile))
+            return condition switch
             {
-                key.SetValue("ConfigFile", configFile);
-            }
-            key.Close();
+                "architecture_x64" => RuntimeInformation.OSArchitecture == Architecture.X64,
+                "architecture_arm64" => RuntimeInformation.OSArchitecture == Architecture.Arm64,
+                _ => true // Unknown conditions default to true
+            };
         }
-        catch (Exception ex)
+
+        static bool IsInSetupAssistantContext()
         {
-            Console.WriteLine($"Warning: Failed to store configuration in registry: {ex.Message}");
+            // Multiple checks for Windows OOBE/Setup Assistant context
+            try
+            {
+                // Check if explorer.exe is running (not typically running during OOBE)
+                var explorerProcesses = Process.GetProcessesByName("explorer");
+                var explorerRunning = explorerProcesses.Length > 0;
+                
+                // Check if we're running as SYSTEM (typical during OOBE)
+                var isSystem = Environment.UserName.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
+                
+                // Check if this is the first boot (registry key)
+                var isFirstBoot = false;
+                try
+                {
+                    using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State");
+                    var setupState = key?.GetValue("ImageState")?.ToString();
+                    isFirstBoot = setupState == "IMAGE_STATE_UNDEPLOYABLE" || setupState == "IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE";
+                }
+                catch
+                {
+                    // Ignore registry errors
+                }
+                
+                logger?.LogInformation("Setup context check - Explorer: {ExplorerRunning}, System: {IsSystem}, FirstBoot: {IsFirstBoot}", 
+                    explorerRunning, isSystem, isFirstBoot);
+                
+                return !explorerRunning || isSystem || isFirstBoot;
+            }
+            catch
+            {
+                // If we can't determine, assume we're not in setup context
+                return false;
+            }
+        }
+
+        static bool IsUserLoggedIn()
+        {
+            // Check if we have an interactive user session
+            try
+            {
+                var userName = Environment.UserName;
+                var userDomainName = Environment.UserDomainName;
+                
+                // If we're running as SYSTEM or in a service context, wait for user
+                var hasUser = !string.IsNullOrEmpty(userName) && 
+                              !userName.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase) &&
+                              Environment.UserInteractive;
+                
+                // Also check if explorer is running (good indicator of user session)
+                var explorerProcesses = Process.GetProcessesByName("explorer");
+                var explorerRunning = explorerProcesses.Length > 0;
+                
+                return hasUser && explorerRunning;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }
