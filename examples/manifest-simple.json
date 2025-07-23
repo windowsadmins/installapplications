@@ -1,0 +1,40 @@
+{
+  "packages": [
+    {
+      "name": "Microsoft Teams",
+      "type": "msi",
+      "url": "https://example.com/packages/teams.msi",
+      "arguments": "/quiet ALLUSERS=1",
+      "phase": "setupassistant",
+      "required": true,
+      "dependencies": []
+    },
+    {
+      "name": "Adobe Reader",
+      "type": "exe",
+      "url": "https://example.com/packages/reader.exe",
+      "arguments": "/S",
+      "phase": "userland",
+      "required": false,
+      "dependencies": ["Microsoft Teams"]
+    },
+    {
+      "name": "PowerShell Profile Setup",
+      "type": "powershell",
+      "url": "https://example.com/scripts/setup-profile.ps1",
+      "arguments": "-ExecutionPolicy Bypass",
+      "phase": "userland",
+      "required": false,
+      "dependencies": []
+    },
+    {
+      "name": "Chocolatey Package Example",
+      "type": "chocolatey",
+      "url": "https://example.com/packages/example.nupkg",
+      "arguments": "--force",
+      "phase": "setupassistant",
+      "required": true,
+      "dependencies": []
+    }
+  ]
+}
