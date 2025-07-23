@@ -2,24 +2,26 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0-windows</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
+    <UseWindowsForms>false</UseWindowsForms>
     <UseWPF>false</UseWPF>
     <OutputType>Exe</OutputType>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <PublishTrimmed>true</PublishTrimmed>
+    <PublishTrimmed>false</PublishTrimmed>
     <AssemblyTitle>InstallApplications</AssemblyTitle>
-    <AssemblyDescription>MDM-agnostic software deployment tool for Windows</AssemblyDescription>
-    <AssemblyCompany>Windows Admins</AssemblyCompany>
+    <AssemblyDescription>MDM-agnostic bootstrapping tool for Windows</AssemblyDescription>
+    <AssemblyCompany>Windows Admins Open Source</AssemblyCompany>
     <AssemblyProduct>InstallApplications</AssemblyProduct>
-    <AssemblyCopyright>Copyright © 2025 Windows Admins</AssemblyCopyright>
+    <AssemblyCopyright>Copyright © Windows Admins Open Source 2025</AssemblyCopyright>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyName>installapplications</AssemblyName>
     <Nullable>enable</Nullable>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <WarningsAsErrors />
-    <WarningsNotAsErrors>NU1701</WarningsNotAsErrors>
+    <WarningsNotAsErrors>NU1701;IL2026</WarningsNotAsErrors>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
@@ -46,9 +48,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="src\InstallApplications.Core\InstallApplications.Core.csproj" />
-    <ProjectReference Include="src\InstallApplications.Service\InstallApplications.Service.csproj" />
-    <ProjectReference Include="src\InstallApplications.Common\InstallApplications.Common.csproj" />
+    <Compile Remove="Program-Generic.cs" />
   </ItemGroup>
 
 </Project>
