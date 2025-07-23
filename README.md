@@ -94,22 +94,22 @@ $installCommand = "InstallApplications.exe --repo https://yourrepo.com/packages 
 
 ## Features
 
-### ✅ Core Functionality
-- [x] Windows Service architecture
-- [x] OOBE/Autopilot integration
-- [x] Multiple package format support
-- [x] Dependency resolution
-- [x] Progress reporting
-- [x] Error handling and retry logic
-- [x] Cleanup and self-removal
+### Core Functionality
+- Windows Service architecture
+- OOBE/Autopilot integration
+- Multiple package format support
+- Dependency resolution
+- Progress reporting
+- Error handling and retry logic
+- Cleanup and self-removal
 
-### 🚧 Planned Features
-- [ ] GUI progress window
-- [ ] Advanced logging and telemetry
-- [ ] Package verification (signatures, hashes)
-- [ ] Rollback capabilities
-- [ ] Configuration profiles
-- [ ] Integration with popular MDM systems
+### Planned Features
+- GUI progress window
+- Advanced logging and telemetry
+- Package verification (signatures, hashes)
+- Rollback capabilities
+- Configuration profiles
+- Integration with popular MDM systems
 
 ## Installation
 
