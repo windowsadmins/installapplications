@@ -1,9 +1,7 @@
 # InstallApplications Build Script
 # Builds and optionally signs the InstallApplications executable for deployment
 
-            # Verify signature
-            Write-Log "Verifying signature..." "INFO"
-            $verifyResult = & signtool verify /pa $FilePathdletBinding()]
+[CmdletBinding()]
 param(
     [switch]$Sign,
     [switch]$NoSign,
@@ -305,6 +303,7 @@ try {
     Write-Log "=== BUILD SUMMARY ===" "INFO"
     
     $successCount = 0
+    $signedCount = 0
     foreach ($result in $buildResults) {
         if ($result.Success) {
             $successCount++
@@ -312,7 +311,21 @@ try {
             if (Test-Path $fullPath) {
                 $fileInfo = Get-Item $fullPath
                 $sizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
-                Write-Log "✅ $($result.Architecture): $($result.Path) ($sizeMB MB)" "SUCCESS"
+                
+                # Check if file is signed
+                $isSigned = $false
+                if ($signingCert) {
+                    try {
+                        $signature = Get-AuthenticodeSignature -FilePath $fullPath
+                        $isSigned = ($signature.Status -eq "Valid")
+                        if ($isSigned) { $signedCount++ }
+                    } catch {
+                        $isSigned = $false
+                    }
+                }
+                
+                $signStatus = if ($signingCert) { if ($isSigned) { " [SIGNED]" } else { " [UNSIGNED]" } } else { "" }
+                Write-Log "✅ $($result.Architecture): $($result.Path) ($sizeMB MB)$signStatus" "SUCCESS"
             } else {
                 Write-Log "✅ $($result.Architecture): Built successfully" "SUCCESS"
             }
@@ -325,7 +338,12 @@ try {
     Write-Log "Built $successCount of $($buildResults.Count) architectures successfully" "INFO"
     
     if ($signingCert) {
-        Write-Log "All executables signed with certificate: $($signingCert.Subject)" "INFO"
+        if ($signedCount -eq $successCount) {
+            Write-Log "All executables signed with certificate: $($signingCert.Subject)" "SUCCESS"
+        } else {
+            Write-Log "Signing completed for $signedCount of $successCount executables" "WARN"
+            Write-Log "Certificate: $($signingCert.Subject)" "INFO"
+        }
     }
     
     if ($successCount -eq $buildResults.Count) {
