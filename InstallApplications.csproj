@@ -7,7 +7,6 @@
     <OutputType>Exe</OutputType>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishTrimmed>false</PublishTrimmed>
     <AssemblyTitle>InstallApplications</AssemblyTitle>
     <AssemblyDescription>MDM-agnostic bootstrapping tool for Windows</AssemblyDescription>
@@ -22,6 +21,7 @@
     <WarningsAsErrors />
     <WarningsNotAsErrors>NU1701;IL2026</WarningsNotAsErrors>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">

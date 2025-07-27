@@ -1,7 +1,9 @@
 # InstallApplications Build Script
 # Builds and optionally signs the InstallApplications executable for deployment
 
-[CmdletBinding()]
+            # Verify signature
+            Write-Log "Verifying signature..." "INFO"
+            $verifyResult = & signtool verify /pa $FilePathdletBinding()]
 param(
     [switch]$Sign,
     [switch]$NoSign,
@@ -87,9 +89,19 @@ function Sign-Executable {
     Write-Log "Signing executable: $([System.IO.Path]::GetFileName($FilePath))" "INFO"
     
     try {
-        # Use signtool for signing
+        # Use signtool for signing - requires elevated permissions
         if (-not (Test-Command "signtool")) {
             throw "signtool not found in PATH. Install Windows SDK."
+        }
+        
+        # Check if running as administrator
+        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+        $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        
+        if (-not $isAdmin) {
+            Write-Log "Code signing requires administrator privileges. Please run PowerShell as Administrator." "ERROR"
+            throw "Access denied: Administrator privileges required for code signing"
         }
         
         $signtoolArgs = @(
@@ -98,7 +110,7 @@ function Sign-Executable {
             "/t", "http://timestamp.digicert.com"
             "/fd", "SHA256"
             "/v"
-            "`"$FilePath`""
+            $FilePath
         )
         
         Write-Log "Running: signtool $($signtoolArgs -join ' ')" "INFO"
@@ -109,7 +121,7 @@ function Sign-Executable {
             
             # Verify signature
             Write-Log "Verifying signature..." "INFO"
-            $verifyResult = & signtool verify /pa "`"$FilePath`""
+            $verifyResult = & signtool verify /pa $FilePath
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "Signature verification successful" "SUCCESS"
                 return $true
@@ -152,6 +164,7 @@ function Build-Architecture {
     # Build arguments
     $buildArgs = @(
         "publish"
+        "InstallApplications.csproj"
         "--configuration", "Release"
         "--runtime", "win-$Arch"
         "--output", $outputDir
@@ -172,6 +185,9 @@ function Build-Architecture {
         if (-not (Test-Path $executablePath)) {
             throw "Expected executable not found: $executablePath"
         }
+        
+        # Convert to absolute path for signing
+        $executablePath = (Get-Item $executablePath).FullName
         
         $fileInfo = Get-Item $executablePath
         $sizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
