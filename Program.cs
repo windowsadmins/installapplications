@@ -1,281 +1,388 @@
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.Threading.Tasks;
-using System.Runtime.InteropServices;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
+using System.Text.Json;
+using System.Collections.Generic;
+using System.Diagnostics;
 
 namespace InstallApplications
 {
-    public record PackageItem(
-        string displayname,
-        string file,
-        string hash,
-        string url,
-        string[]? arguments,
-        string type,
-        string? condition = null
-    );
-
-    public record BootstrapConfig(
-        PackageItem[] setupassistant,
-        PackageItem[] userland
-    );
-
     class Program
     {
-        private static readonly HttpClient httpClient = new();
-        private static ILogger<Program>? logger;
-        private static IConfiguration? configuration;
-
-        static async Task<int> Main(string[] args)
+        static int Main(string[] args)
         {
-            // Basic setup
-            var host = CreateHostBuilder(args).Build();
-            logger = host.Services.GetRequiredService<ILogger<Program>>();
-            configuration = host.Services.GetRequiredService<IConfiguration>();
+            return MainAsync(args).GetAwaiter().GetResult();
+        }
+        
+        static async Task<int> MainAsync(string[] args)
+        {
+            Console.WriteLine("InstallApplications for Windows v1.0.0");
+            Console.WriteLine("MDM-agnostic bootstrapping tool for Windows");
+            Console.WriteLine("Copyright © Windows Admins Open Source 2025");
+            Console.WriteLine();
             
-            logger.LogInformation("Cimian InstallApplications starting for Windows bootstrap...");
+            // Parse command line arguments
+            if (args.Length == 0)
+            {
+                Console.WriteLine("Usage:");
+                Console.WriteLine("  installapplications.exe --url <manifest-url>");
+                Console.WriteLine("  installapplications.exe --help");
+                Console.WriteLine("  installapplications.exe --version");
+                Console.WriteLine();
+                Console.WriteLine("Options:");
+                Console.WriteLine("  --url <url>     URL to the installapplications.json manifest");
+                Console.WriteLine("  --help          Show this help message");
+                Console.WriteLine("  --version       Show version information");
+                return 0;
+            }
             
+            for (int i = 0; i < args.Length; i++)
+            {
+                switch (args[i].ToLower())
+                {
+                    case "--help":
+                    case "-h":
+                        Console.WriteLine("InstallApplications Help");
+                        Console.WriteLine("========================");
+                        Console.WriteLine();
+                        Console.WriteLine("This tool downloads and processes an installapplications.json manifest file");
+                        Console.WriteLine("to automatically install packages during Windows OOBE or setup scenarios.");
+                        Console.WriteLine();
+                        Console.WriteLine("Usage Examples:");
+                        Console.WriteLine("  installapplications.exe --url https://example.com/bootstrap/installapplications.json");
+                        Console.WriteLine();
+                        Console.WriteLine("Features:");
+                        Console.WriteLine("  - Supports multiple package types: MSI, EXE, PowerShell, Chocolatey (.nupkg)");
+                        Console.WriteLine("  - Handles setupassistant (OOBE) and userland installation phases");
+                        Console.WriteLine("  - Admin privilege escalation for elevated packages");
+                        Console.WriteLine("  - Architecture-specific conditional installation");
+                        return 0;
+                        
+                    case "--version":
+                    case "-v":
+                        Console.WriteLine("InstallApplications version 1.0.0");
+                        Console.WriteLine("Built for Windows (.NET 8)");
+                        return 0;
+                        
+                    case "--url":
+                        if (i + 1 < args.Length)
+                        {
+                            string manifestUrl = args[i + 1];
+                            return await ProcessManifest(manifestUrl);
+                        }
+                        else
+                        {
+                            Console.WriteLine("ERROR: --url requires a URL parameter");
+                            return 1;
+                        }
+                }
+            }
+            
+            Console.WriteLine("ERROR: Invalid arguments. Use --help for usage information.");
+            return 1;
+        }
+        
+        static async Task<int> ProcessManifest(string manifestUrl)
+        {
             try
             {
-                // Use Cimian's Azure CDN for bootstrap configuration
-                var bootstrapUrl = configuration["BootstrapJsonUrl"] ?? 
-                    "https://cimian.ecuad.ca/packages/InstallApplications/bootstrap.json";
+                Console.WriteLine($"Downloading manifest from: {manifestUrl}");
                 
-                logger.LogInformation("Downloading Cimian bootstrap configuration from: {Url}", bootstrapUrl);
-                var jsonContent = await httpClient.GetStringAsync(bootstrapUrl);
-                var config = JsonSerializer.Deserialize<BootstrapConfig>(jsonContent);
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "InstallApplications/1.0.0");
                 
-                if (config == null)
+                string jsonContent = await httpClient.GetStringAsync(manifestUrl);
+                Console.WriteLine("Manifest downloaded successfully");
+                
+                // Parse the JSON manifest
+                using var doc = JsonDocument.Parse(jsonContent);
+                var root = doc.RootElement;
+                
+                // Process setupassistant packages first
+                if (root.TryGetProperty("setupassistant", out var setupAssistant))
                 {
-                    logger.LogError("Failed to parse Cimian bootstrap configuration");
-                    return 1;
+                    Console.WriteLine("\nProcessing Setup Assistant packages...");
+                    await ProcessPackages(setupAssistant, "setupassistant");
                 }
-
-                // Check if we're in OOBE/Setup Assistant context
-                var isSetupAssistant = IsInSetupAssistantContext();
-                logger.LogInformation("Windows OOBE/Setup context detected: {IsSetupAssistant}", isSetupAssistant);
-
-                if (isSetupAssistant && config.setupassistant?.Length > 0)
+                
+                // Process userland packages
+                if (root.TryGetProperty("userland", out var userland))
                 {
-                    logger.LogInformation("Processing Cimian Setup Assistant packages...");
-                    await ProcessPackages(config.setupassistant);
+                    Console.WriteLine("\nProcessing Userland packages...");
+                    await ProcessPackages(userland, "userland");
                 }
-
-                // Check if user is logged in for userland packages
-                var isUserLoggedIn = IsUserLoggedIn();
-                logger.LogInformation("User session available: {IsUserLoggedIn}", isUserLoggedIn);
-
-                if (isUserLoggedIn && config.userland?.Length > 0)
-                {
-                    logger.LogInformation("Processing Cimian Userland packages...");
-                    await ProcessPackages(config.userland);
-                }
-
-                logger.LogInformation("Cimian InstallApplications completed successfully");
+                
+                Console.WriteLine("\n✅ InstallApplications completed successfully!");
                 return 0;
             }
             catch (Exception ex)
             {
-                logger?.LogError(ex, "Cimian InstallApplications failed: {Message}", ex.Message);
+                Console.WriteLine($"❌ Error processing manifest: {ex.Message}");
                 return 1;
             }
         }
-
-        static IHostBuilder CreateHostBuilder(string[] args) =>
-            Host.CreateDefaultBuilder(args)
-                .ConfigureAppConfiguration((context, config) =>
-                {
-                    config.AddJsonFile("appsettings.json", optional: true);
-                    config.AddEnvironmentVariables();
-                    config.AddCommandLine(args);
-                })
-                .ConfigureLogging(logging =>
-                {
-                    logging.ClearProviders();
-                    logging.AddConsole();
-                    logging.AddEventLog(settings =>
-                    {
-                        settings.SourceName = "Cimian InstallApplications";
-                    });
-                });
-
-        static async Task ProcessPackages(PackageItem[] packages)
+        
+        static async Task ProcessPackages(JsonElement packages, string phase)
         {
-            foreach (var package in packages)
+            Console.WriteLine($"Phase: {phase}");
+            
+            foreach (var package in packages.EnumerateArray())
             {
                 try
                 {
-                    // Check condition if specified
-                    if (!string.IsNullOrEmpty(package.condition) && !EvaluateCondition(package.condition))
+                    var displayName = package.GetProperty("displayname").GetString() ?? "Unknown";
+                    var url = package.GetProperty("url").GetString() ?? "";
+                    var fileName = package.GetProperty("file").GetString() ?? "";
+                    var type = package.GetProperty("type").GetString() ?? "";
+                    
+                    Console.WriteLine($"  📦 Processing: {displayName}");
+                    
+                    // Check architecture condition if specified
+                    if (package.TryGetProperty("condition", out var condition))
                     {
-                        logger?.LogInformation("Skipping {DisplayName} - condition not met: {Condition}", 
-                            package.displayname, package.condition);
-                        continue;
-                    }
-
-                    logger?.LogInformation("Processing Cimian package: {DisplayName}", package.displayname);
-                    
-                    // Download package
-                    var tempPath = Path.Combine(Path.GetTempPath(), package.file);
-                    await DownloadFile(package.url, tempPath);
-                    
-                    // Verify hash if specified
-                    if (package.hash == "sha256")
-                    {
-                        // For now, skip hash verification - would need hash values in config
-                        logger?.LogInformation("Hash verification configured for {File} (not yet implemented)", package.file);
-                    }
-                    
-                    // Install package
-                    await InstallPackage(tempPath, package.arguments);
-                    
-                    // Cleanup
-                    if (File.Exists(tempPath))
-                    {
-                        File.Delete(tempPath);
+                        var conditionStr = condition.GetString() ?? "";
+                        if (conditionStr.Contains("architecture_x64") && !Environment.Is64BitOperatingSystem)
+                        {
+                            Console.WriteLine($"     ⏭️  Skipping - x64 condition not met");
+                            continue;
+                        }
+                        if (conditionStr.Contains("architecture_arm64") && Environment.Is64BitOperatingSystem)
+                        {
+                            Console.WriteLine($"     ⏭️  Skipping - ARM64 condition not met");
+                            continue;
+                        }
                     }
                     
-                    logger?.LogInformation("Successfully installed Cimian package: {DisplayName}", package.displayname);
+                    await DownloadAndInstallPackage(displayName, url, fileName, type, package);
                 }
                 catch (Exception ex)
                 {
-                    logger?.LogError(ex, "Failed to install Cimian package {DisplayName}: {Message}", 
-                        package.displayname, ex.Message);
-                    // Continue with other packages
+                    Console.WriteLine($"     ❌ Error processing package: {ex.Message}");
                 }
             }
         }
-
-        static async Task DownloadFile(string url, string filePath)
+        
+        static async Task DownloadAndInstallPackage(string displayName, string url, string fileName, string type, JsonElement packageInfo)
         {
-            logger?.LogInformation("Downloading from Cimian CDN: {Url} to {FilePath}", url, filePath);
-            
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Add("User-Agent", "InstallApplications-Windows/1.0 Cimian-Bootstrap");
-            
-            using var response = await httpClient.SendAsync(request);
-            response.EnsureSuccessStatusCode();
-            
-            await using var fileStream = File.Create(filePath);
-            await response.Content.CopyToAsync(fileStream);
-            
-            logger?.LogInformation("Downloaded {FileSize} bytes from Cimian CDN", new FileInfo(filePath).Length);
+            try
+            {
+                // Create temp download directory
+                string tempDir = Path.Combine(Path.GetTempPath(), "InstallApplications");
+                Directory.CreateDirectory(tempDir);
+                
+                string localPath = Path.Combine(tempDir, fileName);
+                
+                Console.WriteLine($"     ⬇️  Downloading from: {url}");
+                
+                using var httpClient = new HttpClient();
+                using var response = await httpClient.GetAsync(url);
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new Exception($"Download failed: {response.StatusCode}");
+                }
+                
+                await using var fileStream = File.Create(localPath);
+                await response.Content.CopyToAsync(fileStream);
+                
+                Console.WriteLine($"     💾 Downloaded to: {localPath}");
+                
+                // Install based on type
+                await InstallPackage(localPath, type, packageInfo);
+                
+                Console.WriteLine($"     ✅ {displayName} installed successfully");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"     ❌ Failed to install {displayName}: {ex.Message}");
+            }
         }
-
-        static async Task InstallPackage(string filePath, string[]? arguments)
+        
+        static async Task InstallPackage(string filePath, string type, JsonElement packageInfo)
         {
-            var args = arguments != null ? string.Join(" ", arguments) : "";
-            logger?.LogInformation("Installing Cimian package {FilePath} with arguments: {Arguments}", filePath, args);
+            switch (type.ToLower())
+            {
+                case "powershell":
+                case "ps1":
+                    await RunPowerShellScript(filePath, packageInfo);
+                    break;
+                    
+                case "msi":
+                    await RunMsiInstaller(filePath, packageInfo);
+                    break;
+                    
+                case "exe":
+                    await RunExecutable(filePath, packageInfo);
+                    break;
+                    
+                case "nupkg":
+                    await RunChocolateyInstall(filePath, packageInfo);
+                    break;
+                    
+                default:
+                    Console.WriteLine($"     ⚠️  Unknown package type: {type}");
+                    break;
+            }
+        }
+        
+        static async Task RunPowerShellScript(string scriptPath, JsonElement packageInfo)
+        {
+            var args = GetArguments(packageInfo);
+            string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" {string.Join(" ", args)}";
+            
+            bool elevated = packageInfo.TryGetProperty("elevated", out var elevatedProp) && elevatedProp.GetBoolean();
             
             var startInfo = new ProcessStartInfo
             {
-                FileName = filePath,
-                Arguments = args,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                Verb = "runas" // Request elevation for system packages
+                FileName = "powershell.exe",
+                Arguments = arguments,
+                UseShellExecute = elevated,
+                RedirectStandardOutput = !elevated,
+                RedirectStandardError = !elevated,
+                CreateNoWindow = !elevated
             };
+            
+            if (elevated)
+            {
+                startInfo.Verb = "runas";
+            }
+            
+            Console.WriteLine($"     🔧 Running PowerShell: {arguments}");
             
             using var process = Process.Start(startInfo);
-            if (process == null)
+            if (process != null)
             {
-                throw new InvalidOperationException($"Failed to start Cimian package installation: {filePath}");
-            }
-            
-            await process.WaitForExitAsync();
-            
-            if (process.ExitCode != 0)
-            {
-                var error = await process.StandardError.ReadToEndAsync();
-                var output = await process.StandardOutput.ReadToEndAsync();
-                logger?.LogWarning("Package installation output: {Output}", output);
-                logger?.LogError("Package installation error: {Error}", error);
-                throw new InvalidOperationException($"Cimian package installation failed with exit code {process.ExitCode}: {error}");
+                await process.WaitForExitAsync();
+                if (process.ExitCode != 0)
+                {
+                    throw new Exception($"PowerShell script failed with exit code: {process.ExitCode}");
+                }
             }
         }
-
-        static bool EvaluateCondition(string condition)
+        
+        static async Task RunMsiInstaller(string msiPath, JsonElement packageInfo)
         {
-            return condition switch
+            var args = GetArguments(packageInfo);
+            string arguments = $"/i \"{msiPath}\" {string.Join(" ", args)}";
+            
+            var startInfo = new ProcessStartInfo
             {
-                "architecture_x64" => RuntimeInformation.OSArchitecture == Architecture.X64,
-                "architecture_arm64" => RuntimeInformation.OSArchitecture == Architecture.Arm64,
-                _ => true // Unknown conditions default to true
+                FileName = "msiexec.exe",
+                Arguments = arguments,
+                UseShellExecute = true,
+                Verb = "runas"
             };
+            
+            Console.WriteLine($"     📦 Running MSI installer: {arguments}");
+            
+            using var process = Process.Start(startInfo);
+            if (process != null)
+            {
+                await process.WaitForExitAsync();
+                if (process.ExitCode != 0)
+                {
+                    throw new Exception($"MSI installer failed with exit code: {process.ExitCode}");
+                }
+            }
         }
-
-        static bool IsInSetupAssistantContext()
+        
+        static async Task RunExecutable(string exePath, JsonElement packageInfo)
         {
-            // Multiple checks for Windows OOBE/Setup Assistant context
+            var args = GetArguments(packageInfo);
+            string arguments = string.Join(" ", args);
+            
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = exePath,
+                Arguments = arguments,
+                UseShellExecute = true,
+                Verb = "runas"
+            };
+            
+            Console.WriteLine($"     🔧 Running executable: {exePath} {arguments}");
+            
+            using var process = Process.Start(startInfo);
+            if (process != null)
+            {
+                await process.WaitForExitAsync();
+                if (process.ExitCode != 0)
+                {
+                    throw new Exception($"Executable failed with exit code: {process.ExitCode}");
+                }
+            }
+        }
+        
+        static async Task RunChocolateyInstall(string nupkgPath, JsonElement packageInfo)
+        {
+            var args = GetArguments(packageInfo);
+            
+            // First check if chocolatey is installed
+            var chocoCheck = new ProcessStartInfo
+            {
+                FileName = "choco.exe",
+                Arguments = "--version",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            
             try
             {
-                // Check if explorer.exe is running (not typically running during OOBE)
-                var explorerProcesses = Process.GetProcessesByName("explorer");
-                var explorerRunning = explorerProcesses.Length > 0;
-                
-                // Check if we're running as SYSTEM (typical during OOBE)
-                var isSystem = Environment.UserName.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase);
-                
-                // Check if this is the first boot (registry key)
-                var isFirstBoot = false;
-                try
+                using var checkProcess = Process.Start(chocoCheck);
+                if (checkProcess != null)
                 {
-                    using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State");
-                    var setupState = key?.GetValue("ImageState")?.ToString();
-                    isFirstBoot = setupState == "IMAGE_STATE_UNDEPLOYABLE" || setupState == "IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE";
+                    await checkProcess.WaitForExitAsync();
+                    if (checkProcess.ExitCode != 0)
+                    {
+                        throw new Exception("Chocolatey not installed");
+                    }
                 }
-                catch
-                {
-                    // Ignore registry errors
-                }
-                
-                logger?.LogInformation("Setup context check - Explorer: {ExplorerRunning}, System: {IsSystem}, FirstBoot: {IsFirstBoot}", 
-                    explorerRunning, isSystem, isFirstBoot);
-                
-                return !explorerRunning || isSystem || isFirstBoot;
             }
             catch
             {
-                // If we can't determine, assume we're not in setup context
-                return false;
+                throw new Exception("Chocolatey is required for .nupkg installation but was not found");
+            }
+            
+            // Install the nupkg
+            string arguments = $"install \"{nupkgPath}\" {string.Join(" ", args)}";
+            
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "choco.exe",
+                Arguments = arguments,
+                UseShellExecute = true,
+                Verb = "runas"
+            };
+            
+            Console.WriteLine($"     🍫 Running Chocolatey: {arguments}");
+            
+            using var process = Process.Start(startInfo);
+            if (process != null)
+            {
+                await process.WaitForExitAsync();
+                if (process.ExitCode != 0)
+                {
+                    throw new Exception($"Chocolatey install failed with exit code: {process.ExitCode}");
+                }
             }
         }
-
-        static bool IsUserLoggedIn()
+        
+        static List<string> GetArguments(JsonElement packageInfo)
         {
-            // Check if we have an interactive user session
-            try
+            var arguments = new List<string>();
+            
+            if (packageInfo.TryGetProperty("arguments", out var argsProperty) && argsProperty.ValueKind == JsonValueKind.Array)
             {
-                var userName = Environment.UserName;
-                var userDomainName = Environment.UserDomainName;
-                
-                // If we're running as SYSTEM or in a service context, wait for user
-                var hasUser = !string.IsNullOrEmpty(userName) && 
-                              !userName.Equals("SYSTEM", StringComparison.OrdinalIgnoreCase) &&
-                              Environment.UserInteractive;
-                
-                // Also check if explorer is running (good indicator of user session)
-                var explorerProcesses = Process.GetProcessesByName("explorer");
-                var explorerRunning = explorerProcesses.Length > 0;
-                
-                return hasUser && explorerRunning;
+                foreach (var arg in argsProperty.EnumerateArray())
+                {
+                    if (arg.ValueKind == JsonValueKind.String)
+                    {
+                        arguments.Add(arg.GetString() ?? "");
+                    }
+                }
             }
-            catch
-            {
-                return false;
-            }
+            
+            return arguments;
         }
     }
 }
