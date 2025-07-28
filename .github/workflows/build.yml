@@ -1,37 +1,308 @@
-name: Build and Test
+name: CI/CD Pipeline
 
 on:
   push:
     branches: [ main, develop ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  PROJECT_NAME: 'InstallApplications'
+  SOLUTION_FILE: 'InstallApplications.sln'
 
 jobs:
-  build:
+  # Job 1: Code Quality and Security Checks
+  code-quality:
+    name: Code Quality & Security
     runs-on: windows-latest
-
+    
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Shallow clones should be disabled for better analysis
     
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: 8.0.x
+        dotnet-version: ${{ env.DOTNET_VERSION }}
         
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore ${{ env.SOLUTION_FILE }}
+    
+    - name: Check code formatting
+      run: dotnet format --verify-no-changes --verbosity diagnostic
       
-    - name: Build
-      run: dotnet build --no-restore
-      
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
-      
-    - name: Publish
-      run: dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true
-      
-    - name: Upload artifacts
+    - name: Run static code analysis
+      run: |
+        dotnet build ${{ env.SOLUTION_FILE }} --configuration Release --no-restore -p:TreatWarningsAsErrors=true
+    
+    # Security scanning with CodeQL
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        
+    - name: CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # Job 2: Build and Test Matrix
+  build-and-test:
+    name: Build & Test
+    runs-on: windows-latest
+    needs: code-quality
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        architecture: [x64, arm64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.SOLUTION_FILE }}
+    
+    - name: Build solution
+      run: |
+        dotnet build ${{ env.SOLUTION_FILE }} `
+          --configuration ${{ matrix.configuration }} `
+          --no-restore `
+          --runtime win-${{ matrix.architecture }} `
+          -p:Platform="Any CPU"
+    
+    - name: Run unit tests
+      run: |
+        dotnet test ${{ env.SOLUTION_FILE }} `
+          --configuration ${{ matrix.configuration }} `
+          --no-build `
+          --verbosity normal `
+          --logger trx `
+          --collect:"XPlat Code Coverage" `
+          --results-directory TestResults/
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ matrix.configuration }}-${{ matrix.architecture }}
+        path: TestResults/
+    
+    - name: Publish coverage reports
+      uses: codecov/codecov-action@v4
+      if: matrix.configuration == 'Release' && matrix.architecture == 'x64'
+      with:
+        file: TestResults/*/coverage.cobertura.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # Job 3: Build Release Artifacts
+  build-artifacts:
+    name: Build Release Artifacts
+    runs-on: windows-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        architecture: [x64, arm64]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Cache NuGet packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-nuget-
+    
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.SOLUTION_FILE }}
+    
+    - name: Publish self-contained executable
+      run: |
+        dotnet publish ${{ env.PROJECT_NAME }}.csproj `
+          --configuration Release `
+          --runtime win-${{ matrix.architecture }} `
+          --self-contained true `
+          --output publish/win-${{ matrix.architecture }} `
+          -p:PublishSingleFile=true `
+          -p:PublishTrimmed=true `
+          -p:IncludeNativeLibrariesForSelfExtract=true `
+          -p:DebugType=None `
+          -p:DebugSymbols=false
+    
+    - name: Create version info
+      shell: pwsh
+      run: |
+        $version = if ($env:GITHUB_REF.StartsWith('refs/tags/v')) {
+          $env:GITHUB_REF -replace 'refs/tags/v', ''
+        } else {
+          "dev-$($env:GITHUB_SHA.Substring(0,7))"
+        }
+        
+        $buildInfo = @{
+          Version = $version
+          CommitSha = $env:GITHUB_SHA
+          BuildDate = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+          Architecture = 'win-${{ matrix.architecture }}'
+          Configuration = 'Release'
+        } | ConvertTo-Json -Indent 2
+        
+        $buildInfo | Out-File -FilePath "publish/win-${{ matrix.architecture }}/build-info.json" -Encoding UTF8
+    
+    - name: Create deployment package
+      shell: pwsh
+      run: |
+        $archiveName = "${{ env.PROJECT_NAME }}-win-${{ matrix.architecture }}.zip"
+        Compress-Archive -Path "publish/win-${{ matrix.architecture }}/*" -DestinationPath $archiveName
+    
+    - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: installapplications-win-x64
-        path: bin/Release/net8.0-windows/win-x64/publish/InstallApplications.exe
+        name: ${{ env.PROJECT_NAME }}-win-${{ matrix.architecture }}
+        path: |
+          publish/win-${{ matrix.architecture }}/
+          ${{ env.PROJECT_NAME }}-win-${{ matrix.architecture }}.zip
+        retention-days: 30
+    
+    - name: Upload standalone executable
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}-exe-win-${{ matrix.architecture }}
+        path: publish/win-${{ matrix.architecture }}/${{ env.PROJECT_NAME }}.exe
+        retention-days: 90
+
+  # Job 4: Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: windows-latest
+    needs: build-artifacts
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download x64 artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}-exe-win-x64
+        path: artifacts/
+    
+    - name: Run basic smoke tests
+      shell: pwsh
+      run: |
+        $exePath = "artifacts/${{ env.PROJECT_NAME }}.exe"
+        
+        # Test 1: Application starts and shows help
+        Write-Host "Testing application startup..."
+        $helpResult = & $exePath --help
+        if ($LASTEXITCODE -ne 0) {
+          throw "Application failed to show help. Exit code: $LASTEXITCODE"
+        }
+        Write-Host "✓ Help command successful"
+        
+        # Test 2: Version information
+        Write-Host "Testing version display..."
+        $versionResult = & $exePath --version
+        if ($LASTEXITCODE -ne 0) {
+          throw "Application failed to show version. Exit code: $LASTEXITCODE"  
+        }
+        Write-Host "✓ Version command successful"
+        
+        # Test 3: Invalid argument handling
+        Write-Host "Testing error handling..."
+        $errorResult = & $exePath --invalid-argument 2>&1
+        if ($LASTEXITCODE -eq 0) {
+          throw "Application should have failed with invalid argument"
+        }
+        Write-Host "✓ Error handling successful"
+        
+        Write-Host "All smoke tests passed!"
+
+  # Job 5: Release (only on tags)
+  release:
+    name: Create Release
+    runs-on: windows-latest
+    needs: [build-artifacts, integration-tests]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts/
+    
+    - name: Create release notes
+      id: release-notes
+      shell: pwsh
+      run: |
+        $version = $env:GITHUB_REF -replace 'refs/tags/v', ''
+        $notes = @"
+        ## InstallApplications for Windows v$version
+        
+        ### Changes in this release
+        - Automated build from commit $($env:GITHUB_SHA.Substring(0,7))
+        - Built with .NET ${{ env.DOTNET_VERSION }}
+        
+        ### Available Downloads
+        - **Windows x64**: InstallApplications-win-x64.zip
+        - **Windows ARM64**: InstallApplications-win-arm64.zip
+        
+        ### Installation
+        1. Download the appropriate ZIP file for your architecture
+        2. Extract the contents
+        3. Run InstallApplications.exe with administrative privileges
+        
+        For more information, see the [README](README.md).
+        "@
+        
+        $notes | Out-File -FilePath release-notes.md -Encoding UTF8
+        echo "notes-file=release-notes.md" >> $env:GITHUB_OUTPUT
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        body_path: ${{ steps.release-notes.outputs.notes-file }}
+        files: |
+          release-artifacts/**/*.zip
+          release-artifacts/**/*.exe
+        draft: false
+        prerelease: ${{ contains(github.ref, '-') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
