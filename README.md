@@ -1,7 +1,10 @@
 # InstallApplications for Windows
 
+[![CI/CD Pipeline](https://github.com/your-org/installapplications/actions/workflows/build.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/build.yml)
+[![Security Scan](https://github.com/your-org/installapplications/actions/workflows/security.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
+[![CodeQL](https://github.com/your-org/installapplications/actions/workflows/codeql.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/codeql.yml)
 
 MDM-agnostic software deployment tool for Windows systems. Inspired by the macOS [InstallApplications](https://github.com/macadmins/installapplications) project, this C# implementation provides automated software deployment during Windows OOBE (Out-of-Box Experience) and post-deployment scenarios.
 

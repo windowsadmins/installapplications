@@ -1,0 +1,132 @@
+name: Performance Testing
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run performance tests weekly on Sunday at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  performance-test:
+    name: Performance Benchmarks
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+    
+    - name: Restore dependencies
+      run: dotnet restore InstallApplications.sln
+    
+    - name: Build Release
+      run: |
+        dotnet build InstallApplications.sln `
+          --configuration Release `
+          --no-restore
+    
+    - name: Create test repository
+      shell: pwsh
+      run: |
+        # Create a test manifest for performance testing
+        $testManifest = @{
+          packages = @(
+            @{
+              name = "TestPackage1"
+              version = "1.0.0"
+              type = "file"
+              url = "https://httpbin.org/base64/SFRUUEJJTiBpcyBhd2Vzb21l"
+              install_path = "C:\temp\test1.txt"
+            }
+            @{
+              name = "TestPackage2"
+              version = "1.0.0"
+              type = "file"
+              url = "https://httpbin.org/base64/SFRUUEJJTiBpcyBhd2Vzb21l"
+              install_path = "C:\temp\test2.txt"
+            }
+          )
+        }
+        
+        New-Item -ItemType Directory -Path "test-perf" -Force
+        $testManifest | ConvertTo-Json -Depth 10 | Out-File -FilePath "test-perf/manifest.json" -Encoding UTF8
+    
+    - name: Run performance tests
+      shell: pwsh
+      run: |
+        $exePath = "bin/Release/net8.0-windows/InstallApplications.exe"
+        
+        # Test 1: Application startup time
+        Write-Host "Testing application startup performance..."
+        $startupTimes = @()
+        for ($i = 1; $i -le 5; $i++) {
+          $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+          & $exePath --help | Out-Null
+          $stopwatch.Stop()
+          $startupTimes += $stopwatch.ElapsedMilliseconds
+          Write-Host "Run $i: $($stopwatch.ElapsedMilliseconds)ms"
+        }
+        
+        $avgStartup = ($startupTimes | Measure-Object -Average).Average
+        Write-Host "Average startup time: ${avgStartup}ms"
+        
+        # Test 2: Memory usage baseline
+        Write-Host "Testing memory usage..."
+        $process = Start-Process -FilePath $exePath -ArgumentList "--help" -PassThru -WindowStyle Hidden
+        Start-Sleep -Seconds 2
+        $memoryMB = [Math]::Round($process.WorkingSet64 / 1MB, 2)
+        $process.WaitForExit()
+        Write-Host "Peak memory usage: ${memoryMB}MB"
+        
+        # Save performance metrics
+        $metrics = @{
+          timestamp = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssZ')
+          commit_sha = $env:GITHUB_SHA
+          startup_time_ms = $avgStartup
+          memory_usage_mb = $memoryMB
+          test_runs = $startupTimes.Count
+        }
+        
+        $metrics | ConvertTo-Json -Indent 2 | Out-File -FilePath "performance-metrics.json" -Encoding UTF8
+        Write-Host "Performance metrics saved to performance-metrics.json"
+    
+    - name: Upload performance results
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-metrics
+        path: performance-metrics.json
+    
+    - name: Performance regression check
+      shell: pwsh
+      run: |
+        # Basic performance thresholds
+        $metrics = Get-Content "performance-metrics.json" | ConvertFrom-Json
+        
+        $maxStartupTime = 2000  # 2 seconds
+        $maxMemoryUsage = 100   # 100 MB
+        
+        $failed = $false
+        
+        if ($metrics.startup_time_ms -gt $maxStartupTime) {
+          Write-Error "Startup time regression: $($metrics.startup_time_ms)ms > ${maxStartupTime}ms"
+          $failed = $true
+        }
+        
+        if ($metrics.memory_usage_mb -gt $maxMemoryUsage) {
+          Write-Error "Memory usage regression: $($metrics.memory_usage_mb)MB > ${maxMemoryUsage}MB"
+          $failed = $true
+        }
+        
+        if ($failed) {
+          exit 1
+        } else {
+          Write-Host "✓ All performance checks passed"
+        }
