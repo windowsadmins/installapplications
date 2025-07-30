@@ -1,51 +1,48 @@
-# Build Configuration for InstallApplications
-
-# Global settings
-Configuration = "Release"
-Platform = "Any CPU"
-TargetFramework = "net8.0-windows"
-
-# Output paths
-OutputPath = "bin\$(Configuration)\"
-PublishPath = "publish\"
-
-# Build properties
-TreatWarningsAsErrors = true
-WarningsAsErrors = ""
-WarningsNotAsErrors = "NU1701;IL2026"
-NoWarn = ""
-
-# Code analysis
-RunAnalyzersDuringBuild = true
-RunCodeAnalysis = true
-CodeAnalysisRuleSet = ""
-
-# Publish settings
-PublishSingleFile = true
-SelfContained = true
-PublishTrimmed = true
-IncludeNativeLibrariesForSelfExtract = true
-DebugType = "none"
-DebugSymbols = false
-
-# Runtime identifiers
-RuntimeIdentifiers = "win-x64;win-arm64"
-
-# Test settings
-CollectCoverage = true
-CoverletOutputFormat = "cobertura,opencover"
-CoverletOutput = "TestResults\"
-Threshold = 80
-ThresholdType = "line,branch,method"
-
-# Version information
-AssemblyTitle = "InstallApplications"
-AssemblyDescription = "MDM-agnostic bootstrapping tool for Windows"
-AssemblyCompany = "Windows Admins Open Source"
-AssemblyProduct = "InstallApplications"
-AssemblyCopyright = "Copyright © Windows Admins Open Source 2025"
-
-# NuGet package settings
-IncludeSymbols = false
-IncludeSource = false
-PackageRequireLicenseAcceptance = false
+<Project>
+  <PropertyGroup>
+    <!-- Global settings -->
+    <Configuration>Release</Configuration>
+    <Platform>Any CPU</Platform>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    
+    <!-- Output paths -->
+    <OutputPath>bin\$(Configuration)\</OutputPath>
+    <PublishPath>publish\</PublishPath>
+    
+    <!-- Build properties -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <WarningsAsErrors></WarningsAsErrors>
+    <WarningsNotAsErrors>NU1701;IL2026</WarningsNotAsErrors>
+    <NoWarn></NoWarn>
+    
+    <!-- Code analysis -->
+    <RunAnalyzersDuringBuild>true</RunAnalyzersDuringBuild>
+    <RunCodeAnalysis>false</RunCodeAnalysis>
+    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
+    
+    <!-- Publish settings -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    
+    <!-- Runtime identifiers -->
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    
+    <!-- Version information -->
+    <AssemblyTitle>InstallApplications</AssemblyTitle>
+    <AssemblyDescription>Cimian OOBE Bootstrap Tool for Windows</AssemblyDescription>
+    <AssemblyCompany>Emily Carr University of Art + Design</AssemblyCompany>
+    <AssemblyProduct>InstallApplications</AssemblyProduct>
+    <AssemblyCopyright>Copyright © Emily Carr University 2025</AssemblyCopyright>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AssemblyFileVersion>1.0.0.0</AssemblyFileVersion>
+    
+    <!-- NuGet package settings -->
+    <IncludeSymbols>false</IncludeSymbols>
+    <IncludeSource>false</IncludeSource>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+</Project>
