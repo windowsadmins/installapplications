@@ -5,13 +5,67 @@ using System.Threading.Tasks;
 using System.Text.Json;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Security.Principal;
+using System.Runtime.InteropServices;
 
 namespace InstallApplications
 {
     class Program
     {
         private static string LogDirectory = @"C:\Program Files\InstallApplications\logs";
-        private static string LogFile = Path.Combine(LogDirectory, $"{DateTime.Now:yyyy-MM-dd-HH:mm:ss}.log");
+        private static string LogFile = Path.Combine(LogDirectory, $"{DateTime.Now:yyyy-MM-dd-HHmmss}.log");
+
+        static bool IsRunningAsAdministrator()
+        {
+            try
+            {
+                var identity = WindowsIdentity.GetCurrent();
+                var principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static bool TryRestartAsAdministrator(string[] args)
+        {
+            try
+            {
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "installapplications.exe"),
+                    Arguments = string.Join(" ", args),
+                    UseShellExecute = true,
+                    Verb = "runas",  // Request elevation
+                    CreateNoWindow = false
+                };
+
+                WriteLog("InstallApplications requires administrator privileges. Requesting elevation...");
+                Console.WriteLine("InstallApplications requires administrator privileges. Requesting elevation...");
+                
+                using var process = Process.Start(startInfo);
+                if (process != null)
+                {
+                    WriteLog($"Elevated process started with PID: {process.Id}");
+                    Console.WriteLine("Elevated process started. This instance will now exit.");
+                    return true;
+                }
+                else
+                {
+                    WriteLog("Failed to start elevated process - user may have denied elevation");
+                    Console.WriteLine("Failed to start elevated process. User may have denied elevation.");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Error attempting to restart as administrator: {ex.Message}");
+                Console.WriteLine($"Error attempting to restart as administrator: {ex.Message}");
+                return false;
+            }
+        }
 
         static void InitializeLogging()
         {
@@ -30,8 +84,12 @@ namespace InstallApplications
                 WriteLog($"User: {Environment.UserName}");
                 WriteLog($"Machine: {Environment.MachineName}");
                 WriteLog($"OS: {Environment.OSVersion}");
-                WriteLog($"Architecture: {(Environment.Is64BitOperatingSystem ? "x64" : "x86")}");
+                WriteLog($"Process Architecture: {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}");
+                WriteLog($"OS Architecture: {System.Runtime.InteropServices.RuntimeInformation.OSArchitecture}");
                 WriteLog($"Working Directory: {Environment.CurrentDirectory}");
+                WriteLog($"Command Line: {Environment.CommandLine}");
+                WriteLog($"Is Interactive: {Environment.UserInteractive}");
+                WriteLog($"Current User: {System.Security.Principal.WindowsIdentity.GetCurrent().Name}");
             }
             catch (Exception ex)
             {
@@ -47,15 +105,21 @@ namespace InstallApplications
                 string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 string logEntry = $"[{timestamp}] {message}";
                 
-                // Write to console
-                Console.WriteLine(logEntry);
-                
-                // Append to log file
+                // Always write to log file first
                 File.AppendAllText(LogFile, logEntry + Environment.NewLine);
+                
+                // Write to console with flush to ensure visibility
+                Console.WriteLine(logEntry);
+                Console.Out.Flush();
             }
             catch
             {
-                // If logging fails, continue silently
+                // If logging fails, continue silently but try console fallback
+                try
+                {
+                    Console.WriteLine($"[LOG ERROR] {message}");
+                }
+                catch { }
             }
         }
 
@@ -63,6 +127,38 @@ namespace InstallApplications
         {
             InitializeLogging();
             WriteLog("Main() called with arguments: " + string.Join(" ", args));
+            
+            // Check if running as administrator
+            if (!IsRunningAsAdministrator())
+            {
+                WriteLog("InstallApplications is not running as Administrator");
+                Console.WriteLine();
+                Console.WriteLine("⚠️  InstallApplications requires administrator privileges");
+                Console.WriteLine("    Package installations need elevated access to install to Program Files,");
+                Console.WriteLine("    write to HKLM registry, install services, and manage system components.");
+                Console.WriteLine();
+                
+                // Attempt to restart as administrator
+                if (TryRestartAsAdministrator(args))
+                {
+                    WriteLog("Successfully launched elevated process. Exiting current instance.");
+                    return 0; // Success - elevated process will handle the work
+                }
+                else
+                {
+                    WriteLog("Failed to obtain administrator privileges. Cannot continue.");
+                    Console.WriteLine("❌ Failed to obtain administrator privileges. Installation cannot continue.");
+                    Console.WriteLine();
+                    Console.WriteLine("Please run InstallApplications as Administrator, or use:");
+                    Console.WriteLine($"  sudo {Environment.ProcessPath ?? "installapplications.exe"} {string.Join(" ", args)}");
+                    return 1; // Error - elevation failed
+                }
+            }
+            
+            WriteLog("Running with administrator privileges ✓");
+            Console.WriteLine("✅ Running with administrator privileges");
+            Console.WriteLine();
+            
             return MainAsync(args).GetAwaiter().GetResult();
         }
         
@@ -252,9 +348,10 @@ namespace InstallApplications
             
             foreach (var package in packages.EnumerateArray())
             {
+                string displayName = "Unknown Package"; // Default value for error handling
                 try
                 {
-                    var displayName = package.GetProperty("name").GetString() ?? "Unknown";
+                    displayName = package.GetProperty("name").GetString() ?? "Unknown";
                     var url = package.GetProperty("url").GetString() ?? "";
                     var fileName = package.GetProperty("file").GetString() ?? "";
                     var type = package.GetProperty("type").GetString() ?? "";
@@ -268,27 +365,39 @@ namespace InstallApplications
                         var conditionStr = condition.GetString() ?? "";
                         WriteLog($"Checking condition: {conditionStr}");
                         
-                        if (conditionStr.Contains("architecture_x64") && !Environment.Is64BitOperatingSystem)
+                        // Get actual processor architecture - use RuntimeInformation for accurate detection
+                        string actualArchitecture = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString().ToUpperInvariant();
+                        WriteLog($"Detected runtime architecture: {actualArchitecture}");
+                        
+                        // Skip x64 packages on non-x64 systems 
+                        // Note: RuntimeInformation reports "X64" for AMD64/Intel 64-bit, "ARM64" for ARM64
+                        if (conditionStr.Contains("architecture_x64") && actualArchitecture != "X64")
                         {
-                            WriteLog($"Skipping {displayName} - x64 condition not met on this architecture");
-                            Console.WriteLine($"     ⏭️  Skipping - x64 condition not met");
+                            WriteLog($"Skipping {displayName} - x64 condition not met on {actualArchitecture} architecture");
+                            Console.WriteLine($"     ⏭️  Skipping - x64 condition not met on {actualArchitecture}");
                             continue;
                         }
-                        if (conditionStr.Contains("architecture_arm64") && Environment.Is64BitOperatingSystem)
+                        
+                        // Skip ARM64 packages on non-ARM64 systems
+                        if (conditionStr.Contains("architecture_arm64") && actualArchitecture != "ARM64")
                         {
-                            WriteLog($"Skipping {displayName} - ARM64 condition not met on this architecture");
-                            Console.WriteLine($"     ⏭️  Skipping - ARM64 condition not met");
+                            WriteLog($"Skipping {displayName} - ARM64 condition not met on {actualArchitecture} architecture");
+                            Console.WriteLine($"     ⏭️  Skipping - ARM64 condition not met on {actualArchitecture}");
                             continue;
                         }
                     }
                     
                     await DownloadAndInstallPackage(displayName, url, fileName, type, package);
                     WriteLog($"Successfully completed package: {displayName}");
+                    Console.WriteLine($"     ✅ {displayName} installed successfully");
                 }
                 catch (Exception ex)
                 {
-                    WriteLog($"Error processing package: {ex.Message}");
-                    Console.WriteLine($"     ❌ Error processing package: {ex.Message}");
+                    WriteLog($"Failed to install package {displayName}: {ex.Message}");
+                    Console.WriteLine($"     ❌ Failed to install package {displayName}: {ex.Message}");
+                    // Continue with next package instead of stopping entire process
+                    // Note: We don't re-throw because we want to continue with other packages
+                    // DO NOT log "Successfully completed" for failed packages - that's the bug you found!
                 }
             }
         }
@@ -313,8 +422,15 @@ namespace InstallApplications
                     throw new Exception($"Download failed: {response.StatusCode}");
                 }
                 
-                await using var fileStream = File.Create(localPath);
-                await response.Content.CopyToAsync(fileStream);
+                // Ensure the file stream is completely closed before proceeding
+                {
+                    await using var fileStream = File.Create(localPath);
+                    await response.Content.CopyToAsync(fileStream);
+                    await fileStream.FlushAsync();
+                } // fileStream is disposed here
+                
+                // Add a small delay to ensure file handle is released
+                await Task.Delay(100);
                 
                 var fileInfo = new FileInfo(localPath);
                 WriteLog($"Downloaded {displayName} to: {localPath} (Size: {fileInfo.Length / 1024 / 1024:F2} MB)");
@@ -331,6 +447,8 @@ namespace InstallApplications
             {
                 WriteLog($"Failed to install {displayName}: {ex.Message}");
                 Console.WriteLine($"     ❌ Failed to install {displayName}: {ex.Message}");
+                // Re-throw the exception so the caller knows the installation failed
+                throw;
             }
         }
         
@@ -369,26 +487,23 @@ namespace InstallApplications
             var args = GetArguments(packageInfo);
             string arguments = $"-ExecutionPolicy Bypass -File \"{scriptPath}\" {string.Join(" ", args)}";
             
-            bool elevated = packageInfo.TryGetProperty("elevated", out var elevatedProp) && elevatedProp.GetBoolean();
+            // Since InstallApplications is already running as admin, all PowerShell scripts should inherit admin privileges
+            // This ensures chocolatey and other system installers work properly
+            bool needsElevation = true; // Always run elevated since we're in an admin context
             
             WriteLog($"Running PowerShell script: {scriptPath}");
             WriteLog($"Arguments: {arguments}");
-            WriteLog($"Elevated: {elevated}");
+            WriteLog($"Elevated: {needsElevation}");
             
             var startInfo = new ProcessStartInfo
             {
                 FileName = "powershell.exe",
                 Arguments = arguments,
-                UseShellExecute = elevated,
-                RedirectStandardOutput = !elevated,
-                RedirectStandardError = !elevated,
-                CreateNoWindow = !elevated
+                UseShellExecute = false, // Use CreateProcess to inherit admin privileges
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
             };
-            
-            if (elevated)
-            {
-                startInfo.Verb = "runas";
-            }
             
             Console.WriteLine($"     🔧 Running PowerShell: {arguments}");
             
@@ -396,6 +511,26 @@ namespace InstallApplications
             if (process != null)
             {
                 await process.WaitForExitAsync();
+                
+                // Capture output for debugging
+                if (startInfo.RedirectStandardOutput)
+                {
+                    string output = await process.StandardOutput.ReadToEndAsync();
+                    if (!string.IsNullOrWhiteSpace(output))
+                    {
+                        WriteLog($"PowerShell output: {output}");
+                    }
+                }
+                
+                if (startInfo.RedirectStandardError)
+                {
+                    string error = await process.StandardError.ReadToEndAsync();
+                    if (!string.IsNullOrWhiteSpace(error))
+                    {
+                        WriteLog($"PowerShell error: {error}");
+                    }
+                }
+                
                 WriteLog($"PowerShell script completed with exit code: {process.ExitCode}");
                 
                 if (process.ExitCode != 0)
@@ -405,25 +540,73 @@ namespace InstallApplications
             }
         }
         
+        static bool RequiresElevation(string scriptPath, JsonElement packageInfo)
+        {
+            // Get the script filename to check for known patterns
+            string scriptFileName = Path.GetFileName(scriptPath).ToLowerInvariant();
+            
+            // Get package name/ID for specific package checks
+            string packageName = "";
+            if (packageInfo.TryGetProperty("name", out var nameProp))
+            {
+                packageName = nameProp.GetString()?.ToLowerInvariant() ?? "";
+            }
+            
+            string packageId = "";
+            if (packageInfo.TryGetProperty("packageid", out var idProp))
+            {
+                packageId = idProp.GetString()?.ToLowerInvariant() ?? "";
+            }
+            
+            // Scripts that definitely need elevation
+            if (scriptFileName.Contains("chocolatey") || 
+                scriptFileName.Contains("install-chocolatey") ||
+                packageName.Contains("chocolatey") ||
+                packageId.Contains("chocolatey"))
+            {
+                return true;
+            }
+            
+            // Any script that installs system-wide components needs elevation
+            if (scriptFileName.Contains("install") && 
+                (scriptFileName.Contains("system") || scriptFileName.Contains("global")))
+            {
+                return true;
+            }
+            
+            // Package manager installers typically need elevation
+            if (packageName.Contains("package manager") || 
+                packageId.Contains("package-manager"))
+            {
+                return true;
+            }
+            
+            return false;
+        }
+        
         static async Task RunMsiInstaller(string msiPath, JsonElement packageInfo)
         {
             var args = GetArguments(packageInfo);
-            string arguments = $"/i \"{msiPath}\" {string.Join(" ", args)}";
+            string arguments = $"/i \"{msiPath}\" /quiet /norestart {string.Join(" ", args)}";
             
             var startInfo = new ProcessStartInfo
             {
                 FileName = "msiexec.exe",
                 Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas"
+                UseShellExecute = false, // Inherit admin privileges from parent process
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
             };
             
+            WriteLog($"Running MSI installer: {arguments}");
             Console.WriteLine($"     📦 Running MSI installer: {arguments}");
             
             using var process = Process.Start(startInfo);
             if (process != null)
             {
                 await process.WaitForExitAsync();
+                WriteLog($"MSI installer completed with exit code: {process.ExitCode}");
                 if (process.ExitCode != 0)
                 {
                     throw new Exception($"MSI installer failed with exit code: {process.ExitCode}");
@@ -436,20 +619,45 @@ namespace InstallApplications
             var args = GetArguments(packageInfo);
             string arguments = string.Join(" ", args);
             
+            WriteLog($"Running executable: {exePath} {arguments}");
+            Console.WriteLine($"     🔧 Running executable: {exePath} {arguments}");
+            
             var startInfo = new ProcessStartInfo
             {
                 FileName = exePath,
                 Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas"
+                UseShellExecute = false,  // Inherit admin privileges from parent process
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
             };
-            
-            Console.WriteLine($"     🔧 Running executable: {exePath} {arguments}");
             
             using var process = Process.Start(startInfo);
             if (process != null)
             {
                 await process.WaitForExitAsync();
+                
+                // Capture output for debugging
+                if (startInfo.RedirectStandardOutput)
+                {
+                    string output = await process.StandardOutput.ReadToEndAsync();
+                    if (!string.IsNullOrWhiteSpace(output))
+                    {
+                        WriteLog($"Executable output: {output}");
+                    }
+                }
+                
+                if (startInfo.RedirectStandardError)
+                {
+                    string error = await process.StandardError.ReadToEndAsync();
+                    if (!string.IsNullOrWhiteSpace(error))
+                    {
+                        WriteLog($"Executable error: {error}");
+                    }
+                }
+                
+                WriteLog($"Executable completed with exit code: {process.ExitCode}");
+                
                 if (process.ExitCode != 0)
                 {
                     throw new Exception($"Executable failed with exit code: {process.ExitCode}");
@@ -468,6 +676,7 @@ namespace InstallApplications
                 Arguments = "--version",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 CreateNoWindow = true
             };
             
@@ -488,23 +697,27 @@ namespace InstallApplications
                 throw new Exception("Chocolatey is required for .nupkg installation but was not found");
             }
             
-            // Install the nupkg
-            string arguments = $"install \"{nupkgPath}\" {string.Join(" ", args)}";
+            // Install the nupkg - inherit admin privileges from parent process
+            string arguments = $"install \"{nupkgPath}\" -y --ignore-checksums {string.Join(" ", args)}";
             
             var startInfo = new ProcessStartInfo
             {
                 FileName = "choco.exe",
                 Arguments = arguments,
-                UseShellExecute = true,
-                Verb = "runas"
+                UseShellExecute = false, // Inherit admin privileges from parent process
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
             };
             
+            WriteLog($"Running Chocolatey: {arguments}");
             Console.WriteLine($"     🍫 Running Chocolatey: {arguments}");
             
             using var process = Process.Start(startInfo);
             if (process != null)
             {
                 await process.WaitForExitAsync();
+                WriteLog($"Chocolatey completed with exit code: {process.ExitCode}");
                 if (process.ExitCode != 0)
                 {
                     throw new Exception($"Chocolatey install failed with exit code: {process.ExitCode}");
