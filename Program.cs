@@ -7,6 +7,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Security.Principal;
 using System.Runtime.InteropServices;
+using System.IO.Compression;
+using System.Linq;
+using System.Xml.Linq;
 
 namespace InstallApplications
 {
@@ -665,14 +668,25 @@ namespace InstallApplications
             }
         }
         
-        static async Task RunChocolateyInstall(string nupkgPath, JsonElement packageInfo)
+        static async Task EnsureChocolateyInstalled()
         {
-            var args = GetArguments(packageInfo);
+            WriteLog("Checking if Chocolatey is installed...");
             
-            // First check if chocolatey is installed
+            // Find chocolatey executable path  
+            string chocoPath = "choco.exe";
+            string chocoInstallPath = Environment.GetEnvironmentVariable("ChocolateyInstall");
+            if (!string.IsNullOrEmpty(chocoInstallPath))
+            {
+                string fullChocoPath = Path.Combine(chocoInstallPath, "bin", "choco.exe");
+                if (File.Exists(fullChocoPath))
+                {
+                    chocoPath = fullChocoPath;
+                }
+            }
+            
             var chocoCheck = new ProcessStartInfo
             {
-                FileName = "choco.exe",
+                FileName = chocoPath,
                 Arguments = "--version",
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -686,37 +700,184 @@ namespace InstallApplications
                 if (checkProcess != null)
                 {
                     await checkProcess.WaitForExitAsync();
-                    if (checkProcess.ExitCode != 0)
+                    if (checkProcess.ExitCode == 0)
                     {
-                        throw new Exception("Chocolatey not installed");
+                        WriteLog("Chocolatey is already installed");
+                        Console.WriteLine($"     ✅ Chocolatey is already installed");
+                        return; // Chocolatey is available
                     }
                 }
             }
             catch
             {
-                throw new Exception("Chocolatey is required for .nupkg installation but was not found");
+                // choco.exe not found, need to install
             }
             
-            // Install the nupkg - inherit admin privileges from parent process
-            string arguments = $"install \"{nupkgPath}\" -y --ignore-checksums {string.Join(" ", args)}";
+            WriteLog("Chocolatey not found. Installing Chocolatey...");
+            Console.WriteLine($"     📦 Installing Chocolatey package manager...");
+            
+            // Install Chocolatey using the official installation method
+            // Use PowerShell with proper elevation for ESP environment
+            string installScript = "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))";
+            
+            var chocolateyInstall = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = $"-ExecutionPolicy Bypass -Command \"{installScript}\"",
+                UseShellExecute = true, // Critical for ESP privilege inheritance
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            
+            using var installProcess = Process.Start(chocolateyInstall);
+            if (installProcess != null)
+            {
+                await installProcess.WaitForExitAsync();
+                
+                WriteLog($"Chocolatey installation completed with exit code: {installProcess.ExitCode}");
+                
+                if (installProcess.ExitCode != 0)
+                {
+                    throw new Exception($"Chocolatey installation failed with exit code: {installProcess.ExitCode}");
+                }
+                
+                WriteLog("Chocolatey installed successfully");
+                Console.WriteLine($"     ✅ Chocolatey installed successfully");
+                
+                // Refresh environment variables to pick up chocolatey PATH
+                WriteLog("Refreshing environment variables...");
+                RefreshEnvironmentPath();
+            }
+        }
+        
+        static void RefreshEnvironmentPath()
+        {
+            try
+            {
+                // Get the current PATH from the registry (machine and user)
+                string machinePath = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.Machine) ?? "";
+                string userPath = Environment.GetEnvironmentVariable("PATH", EnvironmentVariableTarget.User) ?? "";
+                string combinedPath = machinePath + ";" + userPath;
+                
+                // Update the current process PATH
+                Environment.SetEnvironmentVariable("PATH", combinedPath, EnvironmentVariableTarget.Process);
+                
+                WriteLog("Environment PATH refreshed");
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Warning: Could not refresh PATH environment variable: {ex.Message}");
+                // Continue anyway - chocolatey might still work
+            }
+        }
+        
+        static async Task RunChocolateyInstall(string nupkgPath, JsonElement packageInfo)
+        {
+            var args = GetArguments(packageInfo);
+            
+            // First check if chocolatey is installed, install it if missing
+            await EnsureChocolateyInstalled();
+            
+            // Extract package details from the .nupkg file by reading the .nuspec
+            string packageDir = Path.GetDirectoryName(nupkgPath) ?? Path.GetTempPath();
+            string packageId = "";
+            string packageVersion = "";
+            
+            try
+            {
+                // Read the .nuspec file from the .nupkg to get the correct package ID and version
+                using var archive = ZipFile.OpenRead(nupkgPath);
+                var nuspecEntry = archive.Entries.FirstOrDefault(e => e.FullName.EndsWith(".nuspec"));
+                
+                if (nuspecEntry != null)
+                {
+                    using var stream = nuspecEntry.Open();
+                    using var reader = new StreamReader(stream);
+                    string nuspecContent = await reader.ReadToEndAsync();
+                    
+                    // Parse XML to extract ID and version
+                    var doc = System.Xml.Linq.XDocument.Parse(nuspecContent);
+                    var ns = doc.Root?.GetDefaultNamespace();
+                    
+                    packageId = doc.Root?.Element(ns + "metadata")?.Element(ns + "id")?.Value ?? "";
+                    packageVersion = doc.Root?.Element(ns + "metadata")?.Element(ns + "version")?.Value ?? "";
+                    
+                    WriteLog($"Extracted from .nuspec: ID='{packageId}', Version='{packageVersion}'");
+                }
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Failed to read package metadata from {nupkgPath}: {ex.Message}");
+                // Fallback to filename parsing
+                string packageFileName = Path.GetFileNameWithoutExtension(nupkgPath);
+                int lastDashIndex = packageFileName.LastIndexOf('-');
+                if (lastDashIndex > 0 && lastDashIndex < packageFileName.Length - 1)
+                {
+                    string potentialVersion = packageFileName.Substring(lastDashIndex + 1);
+                    if (potentialVersion.Contains('.'))
+                    {
+                        packageId = packageFileName.Substring(0, lastDashIndex);
+                        packageVersion = potentialVersion;
+                    }
+                }
+                
+                if (string.IsNullOrEmpty(packageId))
+                {
+                    packageId = packageFileName;
+                }
+                WriteLog($"Fallback filename parsing: ID='{packageId}', Version='{packageVersion}'");
+            }
+            
+            if (string.IsNullOrEmpty(packageId))
+            {
+                throw new Exception($"Could not determine package ID from {nupkgPath}");
+            }
+            
+            // Use proper chocolatey syntax: install package --source=directory --version=version
+            // Add --force to handle version conflicts
+            string arguments;
+            if (!string.IsNullOrEmpty(packageVersion))
+            {
+                arguments = $"install \"{packageId}\" --source=\"{packageDir}\" --version=\"{packageVersion}\" -y --ignore-checksums --acceptlicense --confirm --force {string.Join(" ", args)}";
+            }
+            else
+            {
+                arguments = $"install \"{packageId}\" --source=\"{packageDir}\" -y --ignore-checksums --acceptlicense --confirm --force {string.Join(" ", args)}";
+            }
+
+            // Find chocolatey executable path
+            string chocoPath = "choco.exe";
+            string chocoInstallPath = Environment.GetEnvironmentVariable("ChocolateyInstall");
+            if (!string.IsNullOrEmpty(chocoInstallPath))
+            {
+                string fullChocoPath = Path.Combine(chocoInstallPath, "bin", "choco.exe");
+                if (File.Exists(fullChocoPath))
+                {
+                    chocoPath = fullChocoPath;
+                }
+            }
+
+            // In ESP environment, InstallApplications should already be running elevated
+            // Use PowerShell with UseShellExecute = true to ensure proper privilege inheritance
+            string powershellCommand = $"& '{chocoPath}' {arguments}";
             
             var startInfo = new ProcessStartInfo
             {
-                FileName = "choco.exe",
-                Arguments = arguments,
-                UseShellExecute = false, // Inherit admin privileges from parent process
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
+                FileName = "powershell.exe",
+                Arguments = $"-ExecutionPolicy Bypass -Command \"{powershellCommand}\"",
+                UseShellExecute = true, // Critical for ESP privilege inheritance
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             };
             
-            WriteLog($"Running Chocolatey: {arguments}");
-            Console.WriteLine($"     🍫 Running Chocolatey: {arguments}");
+            WriteLog($"Running Chocolatey via PowerShell: {powershellCommand}");
+            Console.WriteLine($"     🍫 Running Chocolatey via PowerShell: {chocoPath} {arguments}");
             
             using var process = Process.Start(startInfo);
             if (process != null)
             {
                 await process.WaitForExitAsync();
+                
                 WriteLog($"Chocolatey completed with exit code: {process.ExitCode}");
                 if (process.ExitCode != 0)
                 {
