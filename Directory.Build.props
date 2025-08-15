@@ -1,48 +1,17 @@
 <Project>
   <PropertyGroup>
-    <!-- Global settings -->
-    <Configuration>Release</Configuration>
-    <Platform>Any CPU</Platform>
     <TargetFramework>net8.0-windows</TargetFramework>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     
-    <!-- Output paths -->
-    <OutputPath>bin\$(Configuration)\</OutputPath>
-    <PublishPath>publish\</PublishPath>
-    
-    <!-- Build properties -->
-    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
-    <WarningsAsErrors></WarningsAsErrors>
-    <WarningsNotAsErrors>NU1701;IL2026</WarningsNotAsErrors>
-    <NoWarn></NoWarn>
-    
-    <!-- Code analysis -->
-    <RunAnalyzersDuringBuild>true</RunAnalyzersDuringBuild>
-    <RunCodeAnalysis>false</RunCodeAnalysis>
-    <CodeAnalysisRuleSet></CodeAnalysisRuleSet>
-    
-    <!-- Publish settings -->
+    <!-- Single file deployment -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
-    <PublishTrimmed>false</PublishTrimmed>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <DebugType>none</DebugType>
-    <DebugSymbols>false</DebugSymbols>
-    
-    <!-- Runtime identifiers -->
-    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     
     <!-- Version information -->
     <AssemblyTitle>InstallApplications</AssemblyTitle>
     <AssemblyDescription>Cimian OOBE Bootstrap Tool for Windows</AssemblyDescription>
     <AssemblyCompany>Emily Carr University of Art + Design</AssemblyCompany>
-    <AssemblyProduct>InstallApplications</AssemblyProduct>
-    <AssemblyCopyright>Copyright © Emily Carr University 2025</AssemblyCopyright>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <AssemblyFileVersion>1.0.0.0</AssemblyFileVersion>
-    
-    <!-- NuGet package settings -->
-    <IncludeSymbols>false</IncludeSymbols>
-    <IncludeSource>false</IncludeSource>
-    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
   </PropertyGroup>
 </Project>
