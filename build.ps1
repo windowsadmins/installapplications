@@ -45,6 +45,31 @@ function Test-Command {
     return [bool](Get-Command $Command -ErrorAction SilentlyContinue)
 }
 
+# Function to ensure signtool is available
+function Test-SignTool {
+    $c = Get-Command signtool.exe -ErrorAction SilentlyContinue
+    if ($c) { return }
+    $roots = @(
+        "$env:ProgramFiles\Windows Kits\10\bin",
+        "$env:ProgramFiles(x86)\Windows Kits\10\bin"
+    ) | Where-Object { Test-Path $_ }
+
+    try {
+        $kitsRoot = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -EA Stop).KitsRoot10
+        if ($kitsRoot) { $roots += (Join-Path $kitsRoot 'bin') }
+    } catch {}
+
+    foreach ($root in $roots) {
+        $cand = Get-ChildItem -Path (Join-Path $root '*\x64\signtool.exe') -EA SilentlyContinue |
+                Sort-Object LastWriteTime -Desc | Select-Object -First 1
+        if ($cand) {
+            $env:Path = "$($cand.Directory.FullName);$env:Path"
+            return
+        }
+    }
+    throw "signtool.exe not found. Install Windows 10/11 SDK (Signing Tools)."
+}
+
 # Function to find signing certificate
 function Get-SigningCertificate {
     param([string]$Thumbprint = $null)
@@ -73,6 +98,48 @@ function Get-SigningCertificate {
     return $null
 }
 
+# Function to sign executable with robust retry and multiple timestamp servers
+function Invoke-SignArtifact {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Thumbprint,
+        [int]$MaxAttempts = 4
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { throw "File not found: $Path" }
+
+    $tsas = @(
+        'http://timestamp.digicert.com',
+        'http://timestamp.sectigo.com',
+        'http://timestamp.entrust.net/TSS/RFC3161sha2TS'
+    )
+
+    $attempt = 0
+    while ($attempt -lt $MaxAttempts) {
+        $attempt++
+        foreach ($tsa in $tsas) {
+            & signtool.exe sign `
+                /sha1 $Thumbprint `
+                /fd SHA256 `
+                /td SHA256 `
+                /tr $tsa `
+                /v `
+                "$Path"
+            $code = $LASTEXITCODE
+
+            if ($code -eq 0) {
+                # Optional append of legacy timestamp for old verifiers; harmless if TSA rejects.
+                & signtool.exe timestamp /t http://timestamp.digicert.com /v "$Path" 2>$null
+                return
+            }
+
+            Start-Sleep -Seconds (4 * $attempt)
+        }
+    }
+
+    throw "Signing failed after $MaxAttempts attempts across TSAs: $Path"
+}
+
 # Function to sign executable
 function Sign-Executable {
     param(
@@ -87,50 +154,89 @@ function Sign-Executable {
 
     Write-Log "Signing executable: $([System.IO.Path]::GetFileName($FilePath))" "INFO"
 
+    # Check if file is locked by trying to open it exclusively
     try {
-        # Use signtool for signing - requires elevated permissions
-        if (-not (Test-Command "signtool")) {
-            throw "signtool not found in PATH. Install Windows SDK."
-        }
-
-        # Check if running as administrator
-        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-        $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-        if (-not $isAdmin) {
-            Write-Log "Code signing requires administrator privileges. Please run PowerShell as Administrator." "ERROR"
-            throw "Access denied: Administrator privileges required for code signing"
-        }
-
-        $signtoolArgs = @(
-            "sign"
-            "/sha1", $Certificate.Thumbprint
-            "/t", "http://timestamp.digicert.com"
-            "/fd", "SHA256"
-            "/v"
-            $FilePath
-        )
-
-        Write-Log "Running: signtool $($signtoolArgs -join ' ')" "INFO"
-        $result = & signtool @signtoolArgs
-
-        if ($LASTEXITCODE -eq 0) {
-            Write-Log "Successfully signed: $([System.IO.Path]::GetFileName($FilePath))" "SUCCESS"
-
-            # Verify signature
-            Write-Log "Verifying signature..." "INFO"
-            $null = & signtool verify /pa $FilePath
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "Signature verification successful" "SUCCESS"
-                return $true
-            } else {
-                Write-Log "Signature verification failed" "ERROR"
-                return $false
+        $fileStream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'None')
+        $fileStream.Close()
+    }
+    catch {
+        Write-Log "File appears to be locked: $FilePath. Attempting advanced unlock..." "WARN"
+        
+        # Try to identify and terminate processes locking this file
+        try {
+            # Use handle.exe if available to identify locking processes
+            if (Get-Command "handle.exe" -ErrorAction SilentlyContinue) {
+                $handleOutput = & handle.exe $FilePath 2>$null
+                if ($handleOutput -and $handleOutput -match "pid: (\d+)") {
+                    $lockingPids = [regex]::Matches($handleOutput, "pid: (\d+)") | ForEach-Object { $_.Groups[1].Value }
+                    foreach ($procId in $lockingPids) {
+                        try {
+                            $process = Get-Process -Id $procId -ErrorAction SilentlyContinue
+                            if ($process) {
+                                Write-Log "Terminating process $($process.Name) (PID: $procId) that may be locking $FilePath" "INFO"
+                                $process | Stop-Process -Force -ErrorAction SilentlyContinue
+                                Start-Sleep -Seconds 1
+                            }
+                        }
+                        catch {
+                            # Ignore errors when killing processes
+                        }
+                    }
+                }
             }
+        }
+        catch {
+            # Ignore handle.exe errors
+        }
+        
+        # Multiple attempts with increasing delays
+        $unlockAttempts = 3
+        for ($attempt = 1; $attempt -le $unlockAttempts; $attempt++) {
+            Start-Sleep -Seconds ($attempt * 2)
+            
+            # Force garbage collection
+            [System.GC]::Collect()
+            [System.GC]::WaitForPendingFinalizers()
+            [System.GC]::Collect()
+            
+            try {
+                $fileStream = [System.IO.File]::Open($FilePath, 'Open', 'Read', 'None')
+                $fileStream.Close()
+                Write-Log "File unlocked after $attempt attempts: $FilePath" "SUCCESS"
+                break
+            }
+            catch {
+                if ($attempt -eq $unlockAttempts) {
+                    Write-Log "File still locked after $unlockAttempts attempts: $FilePath. Skipping signing." "WARN"
+                    return $false
+                }
+            }
+        }
+    }
+
+    # Check if running as administrator
+    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if (-not $isAdmin) {
+        Write-Log "Code signing requires administrator privileges. Please run PowerShell as Administrator." "ERROR"
+        throw "Access denied: Administrator privileges required for code signing"
+    }
+
+    # Use the robust signing function
+    try {
+        Invoke-SignArtifact -Path $FilePath -Thumbprint $Certificate.Thumbprint
+        Write-Log "Successfully signed: $([System.IO.Path]::GetFileName($FilePath))" "SUCCESS"
+
+        # Verify signature
+        Write-Log "Verifying signature..." "INFO"
+        $null = & signtool verify /pa $FilePath
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Signature verification successful" "SUCCESS"
+            return $true
         } else {
-            Write-Log "Signing failed with exit code: $LASTEXITCODE" "ERROR"
-            Write-Log "Output: $result" "ERROR"
+            Write-Log "Signature verification failed" "ERROR"
             return $false
         }
     } catch {
@@ -208,7 +314,7 @@ function Build-Architecture {
                 }
             }
             
-            if (Sign-Executable -FilePath $executablePath -Certificate $SigningCert) {
+            if (Invoke-SignArtifact -Path $executablePath -Thumbprint $SigningCert.Thumbprint) {
                 Write-Log "Code signing completed for $Arch" "SUCCESS"
             } else {
                 Write-Log "Code signing failed for $Arch" "ERROR"
@@ -282,6 +388,7 @@ try {
     # Handle signing certificate
     $signingCert = $null
     if ($Sign -and -not $NoSign) {
+        Test-SignTool
         $signingCert = Get-SigningCertificate -Thumbprint $Thumbprint
         if (-not $signingCert) {
             Write-Log "Code signing requested but no certificate available" "ERROR"
