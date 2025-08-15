@@ -65,6 +65,7 @@ function Get-SigningCertificate {
     if ($cert) {
         Write-Log "Found enterprise certificate: $($cert.Subject)" "SUCCESS"
         Write-Log "Thumbprint: $($cert.Thumbprint)" "INFO"
+        
         return $cert
     }
     
@@ -78,30 +79,30 @@ function Sign-Executable {
         [string]$FilePath,
         [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
     )
-    
+
     if (-not (Test-Path $FilePath)) {
         Write-Log "File not found for signing: $FilePath" "ERROR"
         return $false
     }
-    
+
     Write-Log "Signing executable: $([System.IO.Path]::GetFileName($FilePath))" "INFO"
-    
+
     try {
         # Use signtool for signing - requires elevated permissions
         if (-not (Test-Command "signtool")) {
             throw "signtool not found in PATH. Install Windows SDK."
         }
-        
+
         # Check if running as administrator
         $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
         $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
         $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        
+
         if (-not $isAdmin) {
             Write-Log "Code signing requires administrator privileges. Please run PowerShell as Administrator." "ERROR"
             throw "Access denied: Administrator privileges required for code signing"
         }
-        
+
         $signtoolArgs = @(
             "sign"
             "/sha1", $Certificate.Thumbprint
@@ -110,16 +111,16 @@ function Sign-Executable {
             "/v"
             $FilePath
         )
-        
+
         Write-Log "Running: signtool $($signtoolArgs -join ' ')" "INFO"
         $result = & signtool @signtoolArgs
-        
+
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Successfully signed: $([System.IO.Path]::GetFileName($FilePath))" "SUCCESS"
-            
+
             # Verify signature
             Write-Log "Verifying signature..." "INFO"
-            $verifyResult = & signtool verify /pa $FilePath
+            $null = & signtool verify /pa $FilePath
             if ($LASTEXITCODE -eq 0) {
                 Write-Log "Signature verification successful" "SUCCESS"
                 return $true
@@ -193,6 +194,20 @@ function Build-Architecture {
         
         # Sign the executable if certificate is provided
         if ($SigningCert) {
+            # Check for ARM64 system building x64 - fix ownership issue
+            $isARM64System = (Get-WmiObject -Class Win32_Processor | Select-Object -First 1).Architecture -eq 12
+            if ($isARM64System -and $Arch -eq "x64") {
+                Write-Log "ARM64 system detected - fixing x64 binary ownership for signing..." "INFO"
+                try {
+                    & takeown /f $executablePath | Out-Null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Log "Fixed x64 binary ownership" "SUCCESS"
+                    }
+                } catch {
+                    Write-Log "Could not fix ownership, but continuing..." "WARN"
+                }
+            }
+            
             if (Sign-Executable -FilePath $executablePath -Certificate $SigningCert) {
                 Write-Log "Code signing completed for $Arch" "SUCCESS"
             } else {
@@ -234,7 +249,7 @@ function Test-Build {
         
         # Test help output  
         Write-Log "Testing --help command..." "INFO"
-        $helpOutput = & $ExecutablePath --help 2>&1
+        $null = & $ExecutablePath --help 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Help test passed" "SUCCESS"
         } else {
