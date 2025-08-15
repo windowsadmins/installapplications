@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.IO.Compression;
 using System.Linq;
 using System.Xml.Linq;
+using Microsoft.Win32;
 
 namespace InstallApplications
 {
@@ -176,6 +177,17 @@ namespace InstallApplications
             Console.WriteLine("Copyright © Windows Admins Open Source 2025");
             Console.WriteLine();
             
+            // Clean up old statuses (older than 24 hours) on startup
+            try
+            {
+                StatusManager.CleanupOldStatuses(TimeSpan.FromHours(24));
+                WriteLog("Cleaned up old installation statuses");
+            }
+            catch (Exception ex)
+            {
+                WriteLog($"Warning: Failed to cleanup old statuses: {ex.Message}");
+            }
+            
             // Parse command line arguments
             if (args.Length == 0)
             {
@@ -183,11 +195,15 @@ namespace InstallApplications
                 Console.WriteLine("  installapplications.exe --url <manifest-url>");
                 Console.WriteLine("  installapplications.exe --help");
                 Console.WriteLine("  installapplications.exe --version");
+                Console.WriteLine("  installapplications.exe --status");
+                Console.WriteLine("  installapplications.exe --clear-status");
                 Console.WriteLine();
                 Console.WriteLine("Options:");
                 Console.WriteLine("  --url <url>     URL to the installapplications.json manifest");
                 Console.WriteLine("  --help          Show this help message");
                 Console.WriteLine("  --version       Show version information");
+                Console.WriteLine("  --status        Show current installation status");
+                Console.WriteLine("  --clear-status  Clear all installation status data");
                 return 0;
             }
             
@@ -211,6 +227,7 @@ namespace InstallApplications
                         Console.WriteLine("  - Handles setupassistant (OOBE) and userland installation phases");
                         Console.WriteLine("  - Admin privilege escalation for elevated packages");
                         Console.WriteLine("  - Architecture-specific conditional installation");
+                        Console.WriteLine("  - Registry-based status tracking for detection scripts");
                         return 0;
                         
                     case "--version":
@@ -218,6 +235,12 @@ namespace InstallApplications
                         Console.WriteLine("InstallApplications version 1.0.0");
                         Console.WriteLine("Built for Windows (.NET 8)");
                         return 0;
+
+                    case "--status":
+                        return ShowStatus();
+
+                    case "--clear-status":
+                        return ClearStatus();
                         
                     case "--url":
                         if (i + 1 < args.Length)
@@ -241,6 +264,10 @@ namespace InstallApplications
         {
             try
             {
+                // Initialize status tracking
+                StatusManager.Initialize(manifestUrl);
+                WriteLog($"Initialized status tracking with RunId: {StatusManager.GetCurrentRunId()}");
+
                 Console.WriteLine($"Downloading manifest from: {manifestUrl}");
                 
                 using var httpClient = new HttpClient();
@@ -256,16 +283,54 @@ namespace InstallApplications
                 // Process setupassistant packages first
                 if (root.TryGetProperty("setupassistant", out var setupAssistant))
                 {
+                    StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Starting);
                     Console.WriteLine("\nProcessing Setup Assistant packages...");
-                    await ProcessPackages(setupAssistant, "setupassistant");
+                    StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Running);
+                    
+                    try
+                    {
+                        await ProcessPackages(setupAssistant, "setupassistant");
+                        StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Completed);
+                        WriteLog("Setup Assistant packages completed successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Failed, ex.Message, 1);
+                        throw; // Re-throw to maintain existing error handling
+                    }
+                }
+                else
+                {
+                    // Mark as skipped if no setupassistant packages
+                    StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Skipped);
+                    WriteLog("No Setup Assistant packages found - marked as skipped");
                 }
                 
                 // Process userland packages
                 if (root.TryGetProperty("userland", out var userland))
                 {
+                    StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Starting);
                     WriteLog("Processing Userland packages...");
                     Console.WriteLine("\nProcessing Userland packages...");
-                    await ProcessPackages(userland, "userland");
+                    StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Running);
+                    
+                    try
+                    {
+                        await ProcessPackages(userland, "userland");
+                        StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Completed);
+                        WriteLog("Userland packages completed successfully");
+                    }
+                    catch (Exception ex)
+                    {
+                        StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Failed, ex.Message, 1);
+                        throw; // Re-throw to maintain existing error handling
+                    }
+                }
+                else
+                {
+                    // Mark as skipped if no userland packages
+                    StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Skipped);
+                    WriteLog("No Userland packages found - marked as skipped");
                 }
                 
                 // After all packages are installed, start CimianStatus in background mode (SYSTEM context)
@@ -282,6 +347,28 @@ namespace InstallApplications
                 WriteLog($"Error processing manifest: {ex.Message}");
                 WriteLog($"Stack trace: {ex.StackTrace}");
                 Console.WriteLine($"❌ Error processing manifest: {ex.Message}");
+                
+                // Ensure status is marked as failed on any unhandled exception
+                try
+                {
+                    // Try to determine which phase failed based on current state
+                    var setupStatus = StatusManager.GetPhaseStatus(InstallationPhase.SetupAssistant);
+                    var userlandStatus = StatusManager.GetPhaseStatus(InstallationPhase.Userland);
+                    
+                    if (setupStatus.Stage == InstallationStage.Running)
+                    {
+                        StatusManager.SetPhaseStatus(InstallationPhase.SetupAssistant, InstallationStage.Failed, ex.Message, 1);
+                    }
+                    else if (userlandStatus.Stage == InstallationStage.Running)
+                    {
+                        StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Failed, ex.Message, 1);
+                    }
+                }
+                catch
+                {
+                    // Don't let status update failures mask the original error
+                }
+                
                 return 1;
             }
         }
@@ -902,6 +989,119 @@ namespace InstallApplications
             }
             
             return arguments;
+        }
+
+        static int ShowStatus()
+        {
+            try
+            {
+                Console.WriteLine("InstallApplications Status");
+                Console.WriteLine("==========================");
+                Console.WriteLine();
+
+                foreach (InstallationPhase phase in Enum.GetValues<InstallationPhase>())
+                {
+                    var status = StatusManager.GetPhaseStatus(phase);
+                    
+                    Console.WriteLine($"Phase: {phase}");
+                    Console.WriteLine($"  Stage: {status.Stage}");
+                    Console.WriteLine($"  Architecture: {status.Architecture}");
+                    
+                    if (!string.IsNullOrEmpty(status.StartTime))
+                        Console.WriteLine($"  Start Time: {status.StartTime}");
+                    
+                    if (!string.IsNullOrEmpty(status.CompletionTime))
+                        Console.WriteLine($"  Completion Time: {status.CompletionTime}");
+                    
+                    if (status.ExitCode != 0)
+                        Console.WriteLine($"  Exit Code: {status.ExitCode}");
+                    
+                    if (!string.IsNullOrEmpty(status.LastError))
+                        Console.WriteLine($"  Last Error: {status.LastError}");
+                    
+                    if (!string.IsNullOrEmpty(status.RunId))
+                        Console.WriteLine($"  Run ID: {status.RunId}");
+                    
+                    if (!string.IsNullOrEmpty(status.BootstrapUrl))
+                        Console.WriteLine($"  Bootstrap URL: {status.BootstrapUrl}");
+                    
+                    Console.WriteLine();
+                }
+
+                // Show registry paths for troubleshooting
+                Console.WriteLine("Registry Paths:");
+                Console.WriteLine("  64-bit: HKLM\\SOFTWARE\\InstallApplications\\Status");
+                Console.WriteLine("  32-bit: HKLM\\SOFTWARE\\WOW6432Node\\InstallApplications\\Status");
+                Console.WriteLine();
+                Console.WriteLine("Status File: C:\\ProgramData\\InstallApplications\\status.json");
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error retrieving status: {ex.Message}");
+                return 1;
+            }
+        }
+
+        static int ClearStatus()
+        {
+            try
+            {
+                Console.WriteLine("Clearing InstallApplications status...");
+
+                // Clear all phase statuses
+                foreach (InstallationPhase phase in Enum.GetValues<InstallationPhase>())
+                {
+                    try
+                    {
+                        // Delete registry entries for this phase
+                        var views = new[] { RegistryView.Registry64, RegistryView.Registry32 };
+                        
+                        foreach (var view in views)
+                        {
+                            try
+                            {
+                                using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+                                baseKey.DeleteSubKeyTree($@"SOFTWARE\InstallApplications\Status\{phase}", false);
+                            }
+                            catch
+                            {
+                                // Key might not exist, continue
+                            }
+                        }
+                        
+                        Console.WriteLine($"  ✅ Cleared {phase} status");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  ⚠️  Warning: Could not clear {phase} status: {ex.Message}");
+                    }
+                }
+
+                // Clear status file
+                try
+                {
+                    var statusFile = @"C:\ProgramData\InstallApplications\status.json";
+                    if (File.Exists(statusFile))
+                    {
+                        File.Delete(statusFile);
+                        Console.WriteLine("  ✅ Cleared status file");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"  ⚠️  Warning: Could not clear status file: {ex.Message}");
+                }
+
+                Console.WriteLine("\n✅ Status cleanup completed");
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error clearing status: {ex.Message}");
+                return 1;
+            }
         }
     }
 }
