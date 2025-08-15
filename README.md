@@ -1,12 +1,43 @@
 # InstallApplications for Windows
 
-[![CI/CD Pipeline](https://github.com/your-org/installapplications/actions/workflows/build.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/build.yml)
-[![Security Scan](https://github.com/your-org/installapplications/actions/workflows/security.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/security.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
-[![CodeQL](https://github.com/your-org/installapplications/actions/workflows/codeql.yml/badge.svg)](https://github.com/your-org/installapplications/actions/workflows/codeql.yml)
+A lightweight bootstrapping tool for Windows device provisioning that downloads and installs packages during OOBE/ESP or after user login.
 
-MDM-agnostic software deployment tool for Windows systems. Inspired by the macOS [InstallApplications](https://github.com/macadmins/installapplications) project, this C# implementation provides automated software deployment during Windows OOBE (Out-of-Box Experience) and post-deployment scenarios.
+## Features
+
+- **Dual Phase Support**: Setup Assistant (pre-login/ESP) and Userland (post-login)
+- **Package Types**: MSI, EXE, PowerShell scripts, Chocolatey packages (.nupkg)
+- **Registry Status Tracking**: Provides completion status for Intune detection scripts
+- **Architecture Support**: x64 and ARM64 with conditional installation
+- **Admin Escalation**: Automatic privilege elevation for packages requiring admin rights
+
+## Quick Start
+
+```powershell
+# Build the application
+.\build.ps1
+
+# Run with a manifest URL
+.\publish\x64\installapplications.exe --url https://your-domain.com/bootstrap/installapplications.json
+
+# Check status (useful for troubleshooting)
+.\publish\x64\installapplications.exe --status
+
+# Clear status (for testing)
+.\publish\x64\installapplications.exe --clear-status
+```
+
+## Registry Status Contract
+
+InstallApplications tracks completion status in both 64-bit and 32-bit registry views:
+
+```
+HKLM\SOFTWARE\InstallApplications\Status\SetupAssistant
+HKLM\SOFTWARE\InstallApplications\Status\Userland
+HKLM\SOFTWARE\WOW6432Node\InstallApplications\Status\SetupAssistant  
+HKLM\SOFTWARE\WOW6432Node\InstallApplications\Status\Userland
+```
+
+**Status Values**: `Starting`, `Running`, `Completed`, `Failed`, `Skipped`
 
 ## Overview
 
