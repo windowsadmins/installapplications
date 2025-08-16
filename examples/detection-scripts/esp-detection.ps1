@@ -4,7 +4,7 @@
 
 $paths = @(
     'HKLM:\SOFTWARE\InstallApplications\Status\SetupAssistant',
-    'HKLM:\SOFTWARE\WOW6432Node\InstallApplications\Status\SetupAssistant'
+    'HKLM\SOFTWARE\WOW6432Node\InstallApplications\Status\SetupAssistant'
 )
 
 foreach ($path in $paths) {
