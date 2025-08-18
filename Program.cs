@@ -332,11 +332,6 @@ namespace InstallApplications
                     StatusManager.SetPhaseStatus(InstallationPhase.Userland, InstallationStage.Skipped);
                     WriteLog("No Userland packages found - marked as skipped");
                 }
-                
-                // After all packages are installed, start CimianStatus in background mode (SYSTEM context)
-                WriteLog("Starting CimianStatus in background mode for pre-login operation...");
-                Console.WriteLine("\nStarting CimianStatus in background mode...");
-                await StartCimianStatusBackground();
 
                 WriteLog("InstallApplications completed successfully!");
                 Console.WriteLine("\n✅ InstallApplications completed successfully!");
@@ -370,64 +365,6 @@ namespace InstallApplications
                 }
                 
                 return 1;
-            }
-        }
-
-        static async Task StartCimianStatusBackground()
-        {
-            try
-            {
-                WriteLog("Looking for CimianStatus executable...");
-                
-                // Check common installation paths for CimianStatus
-                string[] possiblePaths = {
-                    @"C:\Program Files\Cimian\cimistatus.exe",
-                    @"C:\Program Files (x86)\Cimian\cimistatus.exe",
-                    @"C:\Tools\Cimian\cimistatus.exe"
-                };
-
-                string cimianStatusPath = null;
-                foreach (string path in possiblePaths)
-                {
-                    if (File.Exists(path))
-                    {
-                        cimianStatusPath = path;
-                        WriteLog($"Found CimianStatus at: {path}");
-                        break;
-                    }
-                }
-
-                if (cimianStatusPath == null)
-                {
-                    WriteLog("CimianStatus executable not found - will be available after user login");
-                    return;
-                }
-
-                WriteLog("Starting CimianStatus in background service mode...");
-                
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = cimianStatusPath,
-                    Arguments = "--background",  // Signal to run in SYSTEM context mode
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-
-                using var process = Process.Start(startInfo);
-                if (process != null)
-                {
-                    WriteLog($"CimianStatus started with PID: {process.Id}");
-                    
-                    // Don't wait for completion - let it run independently
-                    WriteLog("CimianStatus is now running in background mode before user login");
-                }
-            }
-            catch (Exception ex)
-            {
-                WriteLog($"Warning: Could not start CimianStatus in background: {ex.Message}");
-                // Don't fail the entire process if CimianStatus startup fails
             }
         }
         
