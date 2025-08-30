@@ -28,7 +28,7 @@ namespace InstallApplications
         public string StartTime { get; set; } = "";
         public string CompletionTime { get; set; } = "";
         public int ExitCode { get; set; }
-        public string Version { get; set; } = "1.0.0";
+        public string Version { get; set; } = "2025.08.30.1300";
         public InstallationPhase Phase { get; set; }
         public string Architecture { get; set; } = "";
         public string BootstrapUrl { get; set; } = "";
@@ -43,10 +43,12 @@ namespace InstallApplications
         
         private static string _currentRunId = Guid.NewGuid().ToString();
         private static string _bootstrapUrl = "";
+        private static string _version = "1.0.0"; // Default fallback version
 
-        public static void Initialize(string bootstrapUrl = "")
+        public static void Initialize(string bootstrapUrl = "", string version = "1.0.0")
         {
             _bootstrapUrl = bootstrapUrl;
+            _version = version;
             _currentRunId = Guid.NewGuid().ToString();
             
             // Ensure status directory exists
@@ -69,7 +71,7 @@ namespace InstallApplications
                 var status = new InstallationStatus
                 {
                     Stage = stage,
-                    Version = "1.0.0",
+                    Version = _version,
                     Phase = phase,
                     Architecture = GetArchitecture(),
                     BootstrapUrl = _bootstrapUrl,
